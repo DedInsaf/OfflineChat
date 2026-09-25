@@ -1,0 +1,15 @@
+services:
+  offlinechat-server:
+    build:
+      context: .
+      dockerfile: chat_server/Dockerfile
+    restart: unless-stopped
+    environment:
+      OFFLINECHAT_ADMIN_TOKEN: ${OFFLINECHAT_ADMIN_TOKEN:?set OFFLINECHAT_ADMIN_TOKEN}
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - offlinechat-data:/data
+
+volumes:
+  offlinechat-data:

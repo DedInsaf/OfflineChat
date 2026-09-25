@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>OfflineChatServerURL</key>
+    <string>https://dedinsaf.pythonanywhere.com</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>OfflineChat использует Bluetooth для обмена сообщениями с устройствами поблизости</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>OfflineChat использует Bluetooth для передачи файлов и сообщений</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>OfflineChat может обнаруживать и использовать сервер мессенджера в локальной сети.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>OfflineChat использует GPS, чтобы показать ваши координаты без интернета.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>bluetooth-central</string>
+        <string>bluetooth-peripheral</string>
+    </array>
+    <key>CFBundleName</key>
+    <string>OfflineChat</string>
+    <key>CFBundleDisplayName</key>
+    <string>OfflineChat</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.offlinechat.app</string>
+</dict>
+</plist>

@@ -1,0 +1,12 @@
+# Only the server source is needed by chat_server/Dockerfile.
+**
+!chat_server/
+!chat_server/**
+chat_server/data/
+**/__pycache__/
+**/*.pyc
+**/*.sqlite*
+**/*.db
+**/.env*
+**/*.pem
+**/*.key
