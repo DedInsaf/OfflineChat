@@ -431,6 +431,8 @@ final class OnlineChatStore: ObservableObject {
         if let index = list.firstIndex(where: {
             $0.clientID == incoming.clientID || ($0.serverID != nil && $0.serverID == incoming.serverID)
         }) {
+            // A send timeout can arrive after sync has already confirmed acceptance.
+            if list[index].serverID != nil && incoming.serverID == nil { return }
             var merged = incoming
             if list[index].status.rank > incoming.status.rank { merged.status = list[index].status }
             list[index] = merged

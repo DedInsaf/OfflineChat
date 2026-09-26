@@ -2536,6 +2536,8 @@ class App:
             local_id = event.get("local_id")
             for item in self.online_chats.get(recipient, []):
                 if item.get("local_id") == local_id:
+                    if item.get("status") in ("sent", "delivered", "read"):
+                        return
                     item["status"] = "failed"
                     self.update_online_tick(local_id, "failed")
                     break
