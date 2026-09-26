@@ -1327,6 +1327,10 @@ class App:
         self.page_factories = {}
         self.online_username = load_online_user()
         self.online_chats = load_online_chats()
+        for history in self.online_chats.values():
+            for item in history:
+                if item.get("attachment") and item.get("status") == "sending":
+                    item["status"] = "failed"
         self.online_profiles = load_online_profiles()
         self.online_typing_peers = set()
         self.active_online_chat = None
@@ -1638,6 +1642,7 @@ class App:
                 status=item.get("status"),
                 local_id=item.get("local_id"),
                 scroll=False,
+                attachment=item.get("attachment"),
             )
         transcript.scroll_to_end()
         self.schedule_read(name)
@@ -1645,6 +1650,7 @@ class App:
         bar.pack(fill="x")
         inner = tk.Frame(bar, bg=THEME["surface_alt"], highlightbackground=THEME["line"], highlightthickness=1)
         inner.pack(fill="x", padx=12, pady=10)
+        PillButton(inner, "Файл", command=self.send_online_file, width=64, height=36).pack(side="left", padx=6)
         self.online_entry = tk.Entry(inner, bg=THEME["surface_alt"], fg=THEME["text"], insertbackground=THEME["text"], disabledforeground=THEME["subtle"], selectbackground=THEME["primary"], selectforeground=THEME["primary_fg"], relief="flat", borderwidth=0, highlightthickness=0, font=ui_font(14))
         self.online_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=12)
         self.online_entry.bind("<Return>", lambda _e: self.send_online_msg())
@@ -1653,7 +1659,7 @@ class App:
         self.online_entry.focus()
         self._list_dirty = True
 
-    def add_online_message(self, transcript, text, outgoing=False, status=None, local_id=None, scroll=True):
+    def add_online_message(self, transcript, text, outgoing=False, status=None, local_id=None, scroll=True, attachment=None):
         row = tk.Frame(transcript.inner, bg=THEME["chat_bg"])
         row.pack(fill="x", padx=16, pady=4)
         holder = tk.Frame(row, bg=THEME["chat_bg"])
@@ -1661,6 +1667,11 @@ class App:
         bg = THEME["outgoing"] if outgoing else THEME["incoming"]
         fg = THEME["primary_fg"] if outgoing else THEME["text"]
         tk.Label(holder, text=text, bg=bg, fg=fg, font=ui_font(13), wraplength=420, justify="left", padx=14, pady=10).pack()
+        if attachment:
+            label = tk.Label(holder, text="Сохранить файл · %.1f КБ" % (attachment.get("size", 0) / 1024),
+                             bg=bg, fg=fg, cursor="hand2", padx=14, pady=6)
+            label.pack(fill="x")
+            label.bind("<Button-1>", lambda _event, mid=local_id: self.download_online_file(mid))
         if outgoing:
             mark_color = THEME["danger"] if status == "failed" else (THEME["accent"] if status == "read" else THEME["subtle"])
             mark = tk.Label(holder, text=receipt_mark(status or "sending"), bg=THEME["chat_bg"], fg=mark_color, font=ui_font(10), anchor="e")
@@ -1688,7 +1699,8 @@ class App:
                 item["status"] = "sending"
                 self.update_online_tick(local_id, "sending")
                 self.online_command_queue.put({
-                    "type": "online_send", "recipient": self.active_online_chat,
+                    "type": "online_send_file" if item.get("file_path") else "online_send", "recipient": self.active_online_chat,
+                    "file_path": item.get("file_path"),
                     "text": item.get("text", ""), "local_id": local_id,
                 })
                 self.schedule_save_chats()
@@ -1755,6 +1767,43 @@ class App:
         if self.online_transcript:
             self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id)
         self._list_dirty = True
+
+    def send_online_file(self):
+        if not self.active_online_chat or not self.online_username:
+            return
+        path = filedialog.askopenfilename(title="Отправить файл до 5 МБ")
+        if not path:
+            return
+        try:
+            size = os.path.getsize(path)
+            if not 0 < size <= 5 * 1024 * 1024:
+                raise ValueError("Выберите непустой файл размером до 5 МБ")
+        except (OSError, ValueError) as error:
+            self.set_status("Файл не отправлен", THEME["danger"], str(error))
+            return
+        local_id = str(uuid.uuid4())
+        attachment = {"name": os.path.basename(path), "size": size}
+        text = "📎 " + attachment["name"]
+        item = {"text": text, "attachment": attachment, "file_path": path, "outgoing": True,
+                "status": "sending", "local_id": local_id, "created_at": time.time(), "sort_at": time.time()}
+        self.online_chats.setdefault(self.active_online_chat, []).append(item)
+        self.schedule_save_chats()
+        self.online_command_queue.put({"type": "online_send_file", "recipient": self.active_online_chat,
+                                       "local_id": local_id, "file_path": path})
+        self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id, attachment=attachment)
+        self._list_dirty = True
+
+    def download_online_file(self, local_id):
+        item = next((m for m in self.online_chats.get(self.active_online_chat, []) if m.get("local_id") == local_id), None)
+        if not item or not item.get("sid") or not item.get("attachment"):
+            self.set_status("Файл ещё не отправлен", THEME["warning"], "Дождитесь отправки или повторите её")
+            return
+        attachment = item["attachment"]
+        destination = filedialog.asksaveasfilename(title="Сохранить файл", initialfile=os.path.basename(attachment["name"]))
+        if destination:
+            self.online_command_queue.put({"type": "online_download_file", "message_id": item["sid"],
+                                           "attachment": attachment, "destination": destination})
+            self.set_status("Скачивание…", THEME["warning"], attachment["name"])
 
     def find_user(self):
         query = valid_username(self.find_entry.get() if hasattr(self, "find_entry") else "")
@@ -2284,7 +2333,8 @@ class App:
         current_status = match.get("status") or "sending"
         status = current_status if ranks.get(current_status, 0) > ranks.get(incoming_status, 0) else incoming_status
         match.update({
-            "text": str(message.get("body") or match.get("text") or ""),
+            "text": str(message.get("body") or ("📎 " + message["attachment"]["name"] if message.get("attachment") else match.get("text") or "")),
+            "attachment": message.get("attachment"),
             "outgoing": sender == self.online_username,
             "status": status,
             "local_id": local_id or match.get("local_id"),
@@ -2466,6 +2516,7 @@ class App:
                 self.add_online_message(
                     self.online_transcript, item.get("text", ""), item.get("outgoing", False),
                     status=item.get("status"), local_id=item.get("local_id"),
+                    attachment=item.get("attachment"),
                 )
             elif not was_new and item.get("outgoing"):
                 self.update_online_tick(item.get("local_id"), item.get("status"))
@@ -2476,6 +2527,10 @@ class App:
                     desktop_notify((self.online_profiles.get(peer) or {}).get("display_name") or "@" + peer, item.get("text", ""))
             self.schedule_save_chats()
             self._list_dirty = True
+        elif kind == "online_file_saved":
+            self.set_status("Файл сохранён", THEME["success"], event.get("path", ""))
+        elif kind == "online_file_error":
+            self.set_status("Не удалось скачать", THEME["danger"], message)
         elif kind == "online_send_failed":
             recipient = event.get("recipient")
             local_id = event.get("local_id")
@@ -2485,7 +2540,7 @@ class App:
                     self.update_online_tick(local_id, "failed")
                     break
             self.schedule_save_chats()
-            self.set_status("Не отправлено", THEME["danger"], "Нажмите ! у сообщения, чтобы повторить")
+            self.set_status("Не отправлено", THEME["danger"], str(message) + " · Нажмите ! для повтора")
         elif kind == "online_local_read":
             ids = {str(value) for value in event.get("message_ids") or []}
             peer = event.get("peer")

@@ -1,4 +1,7 @@
 import hashlib
+import base64
+import binascii
+import json
 import re
 import sqlite3
 import threading
@@ -8,6 +11,8 @@ from datetime import datetime, timezone
 
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,19}$")
 STATUS_RANK = {"sent": 1, "delivered": 2, "read": 3}
+MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENT_STORAGE = 100 * 1024 * 1024
 
 
 class ChatDatabaseError(ValueError):
@@ -83,8 +88,15 @@ class ChatDatabase:
                 CREATE INDEX IF NOT EXISTS events_user_cursor ON events(username, id);
                 CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender, id);
                 CREATE INDEX IF NOT EXISTS messages_recipient ON messages(recipient, id);
+                CREATE TABLE IF NOT EXISTS attachments (
+                    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                    content BLOB NOT NULL
+                );
                 """
             )
+            columns = {row[1] for row in self.connection.execute("PRAGMA table_info(messages)")}
+            if "attachment" not in columns:
+                self.connection.execute("ALTER TABLE messages ADD COLUMN attachment TEXT")
             self.connection.commit()
 
     def close(self):
@@ -106,6 +118,7 @@ class ChatDatabase:
         return {
             "id": int(row["id"]),
             "client_id": row["client_id"],
+            "attachment": json.loads(row["attachment"]) if row["attachment"] else None,
             "sender": row["sender"],
             "recipient": row["recipient"],
             "body": row["body"],
@@ -202,7 +215,7 @@ class ChatDatabase:
             ).fetchall()
             return [self._profile(row) for row in rows]
 
-    def send(self, sender, recipient, client_id, body, owner_token):
+    def send(self, sender, recipient, client_id, body, owner_token, attachment=None):
         from_name = _username(sender)
         to_name = _username(recipient)
         text = str(body or "").strip()
@@ -211,7 +224,7 @@ class ChatDatabase:
             raise ChatDatabaseError("cannot send a message to yourself")
         if not request_id or len(request_id) > 80:
             raise ChatDatabaseError("invalid client id")
-        if not text or len(text) > 4000:
+        if (not text and attachment is None) or len(text) > 4000:
             raise ChatDatabaseError("message must contain 1 to 4000 characters")
         now = _now_iso()
         with self.lock:
@@ -223,13 +236,40 @@ class ChatDatabase:
             ).fetchone()
             if existing is not None:
                 return self._message(existing), False
+            metadata, content = None, None
+            if attachment is not None:
+                if not isinstance(attachment, dict):
+                    raise ChatDatabaseError("invalid attachment")
+                filename = attachment.get("name")
+                encoded = attachment.get("data_base64")
+                if (not isinstance(filename, str) or not filename.strip() or len(filename) > 180
+                        or filename in (".", "..") or any(c in filename for c in "/\\")
+                        or any(ord(c) < 32 or ord(c) == 127 for c in filename)):
+                    raise ChatDatabaseError("invalid filename")
+                if not isinstance(encoded, str) or len(encoded) > ((MAX_FILE_BYTES + 2) // 3) * 4:
+                    raise ChatDatabaseError("file exceeds 5 MB", 413)
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except (ValueError, binascii.Error):
+                    raise ChatDatabaseError("invalid file encoding")
+                if not 0 < len(content) <= MAX_FILE_BYTES:
+                    raise ChatDatabaseError("file must contain 1 byte to 5 MB", 413)
+                metadata = json.dumps({"name": filename, "size": len(content),
+                                       "sha256": hashlib.sha256(content).hexdigest()}, ensure_ascii=False)
             try:
                 self.connection.execute("BEGIN IMMEDIATE")
+                if content is not None:
+                    used = self.connection.execute("SELECT COALESCE(SUM(length(content)), 0) FROM attachments").fetchone()[0]
+                    if used + len(content) > MAX_ATTACHMENT_STORAGE:
+                        raise ChatDatabaseError("file storage is full", 507)
                 cursor = self.connection.execute(
-                    "INSERT INTO messages(client_id, sender, recipient, body, status, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, 'sent', ?, ?)",
-                    (request_id, from_name, to_name, text, now, now),
+                    "INSERT INTO messages(client_id, sender, recipient, body, status, created_at, updated_at, attachment) "
+                    "VALUES (?, ?, ?, ?, 'sent', ?, ?, ?)",
+                    (request_id, from_name, to_name, text, now, now, metadata),
                 )
+                if content is not None:
+                    self.connection.execute("INSERT INTO attachments(message_id, content) VALUES (?, ?)",
+                                            (cursor.lastrowid, content))
                 self._add_message_events(cursor.lastrowid, from_name, to_name)
                 self.connection.commit()
             except Exception:
@@ -237,6 +277,18 @@ class ChatDatabase:
                 raise
             row = self.connection.execute("SELECT * FROM messages WHERE id = ?", (cursor.lastrowid,)).fetchone()
             return self._message(row), True
+
+    def download(self, username, owner_token, message_id):
+        with self.lock:
+            profile = self._owned_profile(username, owner_token)
+            row = self.connection.execute(
+                "SELECT a.content FROM attachments a JOIN messages m ON m.id = a.message_id "
+                "WHERE m.id = ? AND (m.sender = ? OR m.recipient = ?)",
+                (int(message_id), profile["name"], profile["name"]),
+            ).fetchone()
+            if row is None:
+                raise ChatDatabaseError("file not found", 404)
+            return {"data_base64": base64.b64encode(row["content"]).decode("ascii")}
 
     def acknowledge(self, username, owner_token, message_ids, status):
         name = _username(username)

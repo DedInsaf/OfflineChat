@@ -1,7 +1,11 @@
 import queue
 import time
+import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 from .api import OnlineAPI
+from .files import stage, discard
 from .models import valid_username
 from .storage import load_cursor, load_owner_token, save_cursor
 
@@ -37,6 +41,37 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
     typing_state = set()
     pending_deliveries = set()
     pending_reads = {}
+    transfers = ThreadPoolExecutor(max_workers=1, thread_name_prefix="online-files")
+
+    def transfer(command, current_username):
+        file_api = OnlineAPI(server_url)
+        try:
+            if command["type"] == "online_send_file":
+                staged = stage(command["file_path"], command["local_id"])
+                message = file_api.send_file(current_username, command["recipient"],
+                                            command["local_id"], staged, token)
+                emit("online_message_sync", message=message, source="send")
+                discard(staged)
+            else:
+                data = file_api.download_file(current_username, token, command["message_id"], command["attachment"])
+                destination = command["destination"]
+                temporary = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=os.path.dirname(destination), delete=False) as stream:
+                        temporary = stream.name
+                        stream.write(data)
+                    os.replace(temporary, destination)
+                finally:
+                    if temporary and os.path.exists(temporary):
+                        os.unlink(temporary)
+                emit("online_file_saved", path=destination)
+        except Exception as exc:
+            if command["type"] == "online_send_file":
+                emit("online_send_failed", recipient=command["recipient"], local_id=command["local_id"], message=_error_text(exc))
+            else:
+                emit("online_file_error", message=_error_text(exc))
+        finally:
+            file_api.close()
 
     def emit(event, **payload):
         status_queue.put({"event": event, **payload})
@@ -88,6 +123,9 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
                 emit("online_username_error", message=_error_text(exc))
             return True
         if not username:
+            return True
+        if kind in ("online_send_file", "online_download_file"):
+            transfers.submit(transfer, dict(command), username)
             return True
         if kind == "find_user":
             query = valid_username(command.get("name"))
@@ -202,4 +240,5 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
                     network_error(exc)
             time.sleep(0.04 if handled else 0.12)
     finally:
+        transfers.shutdown(wait=False, cancel_futures=True)
         api.close()

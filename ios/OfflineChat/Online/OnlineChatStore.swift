@@ -58,6 +58,8 @@ final class OnlineChatStore: ObservableObject {
     @Published private(set) var typingPeers: Set<String> = []
     @Published private(set) var connectionText = "Не подключено"
     @Published private(set) var isWorking = false
+    @Published var fileError = ""
+    @Published private(set) var preparingFile = false
     @Published var claimError = ""
     @Published var searchError = ""
     @Published private(set) var searchResults: [OnlineProfile] = []
@@ -85,6 +87,13 @@ final class OnlineChatStore: ObservableObject {
         if let cache = localStore.load() {
             cursor = cache.cursor
             messages = cache.messages
+            for peer in Array(messages.keys) {
+                messages[peer] = messages[peer]?.map { message in
+                    var recovered = message
+                    if recovered.attachment != nil && recovered.status == .sending { recovered.status = .failed }
+                    return recovered
+                }
+            }
             profiles = cache.profiles
             peers = cache.peers
             myProfile = profiles[username]
@@ -285,6 +294,31 @@ final class OnlineChatStore: ObservableObject {
         await submit(pending)
     }
 
+    func sendFile(_ url: URL, to recipient: String) async {
+        guard !username.isEmpty, !preparingFile else { return }
+        preparingFile = true
+        let id = UUID()
+        do {
+            let attachment = try await OnlineFiles.stage(url, id: id)
+            let message = OnlineMessage(clientID: id, sender: username, recipient: recipient,
+                                        text: "", createdAt: Date(), status: .sending, attachment: attachment)
+            remember(peer: recipient)
+            upsert(message)
+            persist()
+            preparingFile = false
+            await submit(message)
+        } catch {
+            preparingFile = false
+            fileError = error.localizedDescription
+            await OnlineFiles.removeStaged(id)
+        }
+    }
+
+    func downloadFile(_ message: OnlineMessage) async -> URL? {
+        do { return try await api.download(message, username: username, ownerToken: ownerToken) }
+        catch { fileError = error.localizedDescription; return nil }
+    }
+
     func openedChat(with peer: String) {
         openPeer = peer
         remember(peer: peer)
@@ -339,12 +373,14 @@ final class OnlineChatStore: ObservableObject {
         do {
             let saved = try await api.send(message, ownerToken: ownerToken)
             upsert(saved)
+            if message.attachment != nil { await OnlineFiles.removeStaged(message.clientID) }
             connectionText = "Онлайн"
         } catch {
             var failed = message
             failed.status = .failed
             upsert(failed)
             connectionText = "Нет связи"
+            if message.attachment != nil { fileError = error.localizedDescription }
         }
         persist()
     }
@@ -416,7 +452,7 @@ final class OnlineChatStore: ObservableObject {
     private func notify(message: OnlineMessage, peer: String) {
         let content = UNMutableNotificationContent()
         content.title = profiles[peer]?.title ?? "@\(peer)"
-        content.body = message.text
+        content.body = message.previewText
         content.sound = .default
         content.threadIdentifier = "online-chat-\(peer)"
         UNUserNotificationCenter.current().add(

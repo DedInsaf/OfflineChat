@@ -48,6 +48,9 @@ struct OnlineMessage: Codable, Equatable, Identifiable {
     let text: String
     let createdAt: Date
     var status: OnlineMessageStatus
+    var attachment: OnlineAttachment? = nil
+
+    var previewText: String { attachment.map { "📎 " + $0.name } ?? text }
 
     var id: UUID { clientID }
 
@@ -59,10 +62,19 @@ struct OnlineMessage: Codable, Equatable, Identifiable {
         case text = "body"
         case createdAt = "created_at"
         case status
+        case attachment
     }
 
     func isOutgoing(for username: String) -> Bool { sender == username }
     func peer(for username: String) -> String { sender == username ? recipient : sender }
+}
+
+struct OnlineAttachment: Codable, Equatable {
+    let name: String
+    let size: Int
+    let sha256: String
+
+    var sizeText: String { ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file) }
 }
 
 struct OnlineEvent: Decodable {

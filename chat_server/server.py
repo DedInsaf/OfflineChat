@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from .database import ChatDatabase, ChatDatabaseError
 
 
-MAX_BODY_BYTES = 1_200_000
+MAX_BODY_BYTES = 7_100_000  # 5 MiB file encoded as base64 plus JSON metadata
 
 
 class ServerState:
@@ -105,9 +105,14 @@ class ChatHandler(BaseHTTPRequestHandler):
                 result, changed = self.state.database.send(
                     body.get("sender"), body.get("recipient"), body.get("client_id"),
                     body.get("body"), body.get("owner_token"),
+                    body.get("attachment"),
                 )
                 if changed:
                     self.state.notify()
+            elif path == "/v1/files/download":
+                result = self.state.database.download(
+                    body.get("username"), body.get("owner_token"), body.get("message_id")
+                )
             elif path == "/v1/messages/ack":
                 result, changed = self.state.database.acknowledge(
                     body.get("username"), body.get("owner_token"), body.get("message_ids"), body.get("status")

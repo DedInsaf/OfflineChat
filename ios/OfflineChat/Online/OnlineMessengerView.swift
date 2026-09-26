@@ -1,5 +1,7 @@
 import SwiftUI
 import PhotosUI
+import UniformTypeIdentifiers
+import QuickLook
 
 struct OnlineMessengerView: View {
     @ObservedObject var store: OnlineChatStore
@@ -205,7 +207,7 @@ private struct OnlineConversationRow: View {
                     if let message = conversation.lastMessage, message.isOutgoing(for: currentUsername) {
                         OnlineReceiptView(status: message.status, compact: true)
                     }
-                    Text(conversation.lastMessage?.text ?? "Начать диалог")
+                    Text(conversation.lastMessage?.previewText ?? "Начать диалог")
                         .font(.system(size: 14))
                         .foregroundColor(.ocMuted)
                         .lineLimit(1)
@@ -274,6 +276,9 @@ private struct OnlineChatView: View {
     let peer: String
     @State private var draft = ""
     @State private var showProfile = false
+    @State private var showFilePicker = false
+    @State private var previewURL: URL?
+    @State private var downloading = false
 
     private var profile: OnlineProfile? { store.profiles[peer] }
     private var items: [OnlineMessage] { store.messages[peer] ?? [] }
@@ -287,7 +292,15 @@ private struct OnlineChatView: View {
                             OnlineMessageBubble(
                                 message: message,
                                 outgoing: message.isOutgoing(for: store.username),
-                                onRetry: { Task { await store.retry(message) } }
+                                onRetry: { Task { await store.retry(message) } },
+                                onDownload: {
+                                    guard !downloading else { return }
+                                    downloading = true
+                                    Task {
+                                        previewURL = await store.downloadFile(message)
+                                        downloading = false
+                                    }
+                                }
                             )
                             .id(message.id)
                         }
@@ -311,6 +324,8 @@ private struct OnlineChatView: View {
                 .onAppear { scrollToBottom(proxy, animated: false) }
                 .onChange(of: items) { _, _ in scrollToBottom(proxy, animated: true) }
             }
+            if downloading { ProgressView("Скачивание файла…").padding(8) }
+            if store.preparingFile { ProgressView("Подготовка файла…").padding(8) }
             composer
         }
         .background(Color.ocChatBg)
@@ -338,10 +353,25 @@ private struct OnlineChatView: View {
         }
         .onAppear { store.openedChat(with: peer) }
         .onDisappear { store.closedChat(with: peer) }
+        .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.item]) { result in
+            switch result {
+            case .success(let url): Task { await store.sendFile(url, to: peer) }
+            case .failure(let error): store.fileError = error.localizedDescription
+            }
+        }
+        .quickLookPreview($previewURL)
+        .alert("Файлы", isPresented: Binding(get: { !store.fileError.isEmpty }, set: { if !$0 { store.fileError = "" } })) {
+            Button("ОК") { store.fileError = "" }
+        } message: { Text(store.fileError) }
     }
 
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 8) {
+            Button { showFilePicker = true } label: {
+                Image(systemName: "paperclip").font(.title2).frame(width: 38, height: 42)
+            }
+            .disabled(store.preparingFile)
+            .accessibilityLabel("Прикрепить файл до 5 МБ")
             TextField("Сообщение", text: $draft, axis: .vertical)
                 .lineLimit(1...5)
                 .padding(.horizontal, 14)
@@ -383,14 +413,22 @@ private struct OnlineMessageBubble: View {
     let message: OnlineMessage
     let outgoing: Bool
     let onRetry: () -> Void
+    let onDownload: () -> Void
 
     var body: some View {
         HStack(alignment: .bottom) {
             if outgoing { Spacer(minLength: 54) }
             VStack(alignment: .leading, spacing: 3) {
-                Text(message.text)
+                Text(message.previewText)
                     .font(.system(size: 16))
                     .foregroundColor(outgoing ? .ocPrimaryFg : .ocText)
+                if let attachment = message.attachment {
+                    Button(action: onDownload) {
+                        Label("\(attachment.sizeText) · Открыть", systemImage: "arrow.down.doc")
+                            .font(.caption)
+                    }
+                    .disabled(message.serverID == nil)
+                }
                 HStack(spacing: 4) {
                     Spacer(minLength: 0)
                     Text(message.createdAt, format: .dateTime.hour().minute())

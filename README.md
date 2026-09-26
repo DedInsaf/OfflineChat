@@ -38,6 +38,9 @@ certifi и PyInstaller. Запускайте `python offlinechat_app.py` из `m
 
 ## Сервис и ограничения
 
+Онлайн-чат поддерживает файлы до 5 МиБ: скрепка на iPhone и кнопка «Файл»
+на Mac. Подробности, ограничения и протокол: [docs/FILES.md](docs/FILES.md).
+
 Тестовый адрес по умолчанию: `https://dedinsaf.pythonanywhere.com`.
 Развёртывание: `docs/HOSTING_TEST.md`. Собственная серверная часть не использует
 Supabase или FastAPI. WSGI обслуживает короткие запросы; клиенты опрашивают

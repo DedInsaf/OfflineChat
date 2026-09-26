@@ -120,20 +120,44 @@ final class OnlineAPI {
     }
 
     func send(_ message: OnlineMessage, ownerToken: String) async throws -> OnlineMessage {
+        struct FileBody: Encodable {
+            let name: String
+            let data_base64: String
+        }
         struct Body: Encodable {
             let sender: String
             let recipient: String
             let client_id: UUID
             let body: String
             let owner_token: String
+            let attachment: FileBody?
+        }
+        var file: FileBody?
+        if let attachment = message.attachment {
+            file = FileBody(name: attachment.name, data_base64: try await OnlineFiles.encoded(attachment, id: message.clientID))
         }
         return try await call("messages/send", body: Body(
             sender: message.sender,
             recipient: message.recipient,
             client_id: message.clientID,
             body: message.text,
-            owner_token: ownerToken
+            owner_token: ownerToken,
+            attachment: file
         ))
+    }
+
+    func download(_ message: OnlineMessage, username: String, ownerToken: String) async throws -> URL {
+        guard let id = message.serverID, let attachment = message.attachment else {
+            throw OnlineFiles.failure("Дождитесь отправки файла")
+        }
+        struct Body: Encodable {
+            let username: String
+            let owner_token: String
+            let message_id: Int64
+        }
+        struct Download: Decodable { let data_base64: String }
+        let result: Download = try await call("files/download", body: Body(username: username, owner_token: ownerToken, message_id: id))
+        return try await OnlineFiles.saveDownload(result.data_base64, attachment: attachment, id: message.clientID)
     }
 
     func sync(username: String, ownerToken: String, after cursor: Int64) async throws -> OnlineSyncResponse {

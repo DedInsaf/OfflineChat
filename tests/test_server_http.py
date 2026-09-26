@@ -41,6 +41,19 @@ class ServerHTTPTests(unittest.TestCase):
         alice.close()
         bob.close()
 
+    def test_mac_file_api_roundtrip(self):
+        from pathlib import Path
+        path = Path(self.directory.name) / "hello.txt"
+        path.write_bytes("Привет из файла".encode())
+        api = OnlineAPI(self.url)
+        try:
+            api.claim("alice", "Alice", "a" * 64)
+            api.claim("bob", "Bob", "b" * 64)
+            message = api.send_file("alice", "bob", "file-http", path, "a" * 64)
+            self.assertEqual(api.download_file("bob", "b" * 64, message["id"], message["attachment"]), path.read_bytes())
+        finally:
+            api.close()
+
 
 if __name__ == "__main__":
     unittest.main()
