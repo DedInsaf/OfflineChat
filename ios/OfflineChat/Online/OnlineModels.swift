@@ -75,6 +75,21 @@ struct OnlineAttachment: Codable, Equatable {
     let sha256: String
 
     var sizeText: String { ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file) }
+
+    var kind: String {
+        let ext = (name as NSString).pathExtension.lowercased()
+        if ["jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tif", "tiff"].contains(ext) { return "photo" }
+        if ["mov", "mp4", "m4v", "avi", "mkv", "webm"].contains(ext) { return "video" }
+        return "file"
+    }
+
+    var iconName: String {
+        switch kind {
+        case "photo": return "photo.fill"
+        case "video": return "play.rectangle.fill"
+        default: return "doc.fill"
+        }
+    }
 }
 
 struct OnlineEvent: Decodable {

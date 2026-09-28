@@ -1,7 +1,6 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
-import QuickLook
 
 struct OnlineMessengerView: View {
     @ObservedObject var store: OnlineChatStore
@@ -277,8 +276,13 @@ private struct OnlineChatView: View {
     @State private var draft = ""
     @State private var showProfile = false
     @State private var showFilePicker = false
-    @State private var previewURL: URL?
+    @State private var showAttachmentMenu = false
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var selectedVideo: PhotosPickerItem?
+    @State private var downloadedFile: DownloadedOnlineFile?
     @State private var downloading = false
+    @State private var loadingMedia = false
+    @FocusState private var composerFocused: Bool
 
     private var profile: OnlineProfile? { store.profiles[peer] }
     private var items: [OnlineMessage] { store.messages[peer] ?? [] }
@@ -297,7 +301,9 @@ private struct OnlineChatView: View {
                                     guard !downloading else { return }
                                     downloading = true
                                     Task {
-                                        previewURL = await store.downloadFile(message)
+                                        if let url = await store.downloadFile(message) {
+                                            downloadedFile = DownloadedOnlineFile(url: url)
+                                        }
                                         downloading = false
                                     }
                                 }
@@ -325,7 +331,8 @@ private struct OnlineChatView: View {
                 .onChange(of: items) { _, _ in scrollToBottom(proxy, animated: true) }
             }
             if downloading { ProgressView("Скачивание файла…").padding(8) }
-            if store.preparingFile { ProgressView("Подготовка файла…").padding(8) }
+            if store.preparingFile || loadingMedia { ProgressView("Подготовка вложения…").padding(8) }
+            if showAttachmentMenu { attachmentMenu.transition(.move(edge: .bottom).combined(with: .opacity)) }
             composer
         }
         .background(Color.ocChatBg)
@@ -359,7 +366,19 @@ private struct OnlineChatView: View {
             case .failure(let error): store.fileError = error.localizedDescription
             }
         }
-        .quickLookPreview($previewURL)
+        .sheet(item: $downloadedFile) { file in
+            OnlineDownloadedFileSheet(file: file)
+                .presentationDetents([.height(280)])
+                .presentationDragIndicator(.visible)
+        }
+        .onChange(of: selectedPhoto) { _, item in
+            guard let item else { return }
+            loadMedia(item, fallbackPrefix: "Фото")
+        }
+        .onChange(of: selectedVideo) { _, item in
+            guard let item else { return }
+            loadMedia(item, fallbackPrefix: "Видео")
+        }
         .alert("Файлы", isPresented: Binding(get: { !store.fileError.isEmpty }, set: { if !$0 { store.fileError = "" } })) {
             Button("ОК") { store.fileError = "" }
         } message: { Text(store.fileError) }
@@ -367,17 +386,24 @@ private struct OnlineChatView: View {
 
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            Button { showFilePicker = true } label: {
+            Button {
+                composerFocused = false
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                    showAttachmentMenu.toggle()
+                }
+            } label: {
                 Image(systemName: "paperclip").font(.title2).frame(width: 38, height: 42)
+                    .rotationEffect(.degrees(showAttachmentMenu ? 45 : 0))
             }
-            .disabled(store.preparingFile)
-            .accessibilityLabel("Прикрепить файл до 5 МБ")
+            .disabled(store.preparingFile || loadingMedia)
+            .accessibilityLabel("Прикрепить фото, видео или файл до 5 МБ")
             TextField("Сообщение", text: $draft, axis: .vertical)
                 .lineLimit(1...5)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(Color.ocSurfaceAlt)
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .focused($composerFocused)
                 .onChange(of: draft) { _, value in
                     if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         store.sendTyping(to: peer)
@@ -402,6 +428,53 @@ private struct OnlineChatView: View {
         .background(.ultraThinMaterial)
     }
 
+    private var attachmentMenu: some View {
+        HStack(spacing: 18) {
+            PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                AttachmentChoice(icon: "photo.fill", title: "Фото", color: .blue)
+            }
+            PhotosPicker(selection: $selectedVideo, matching: .videos) {
+                AttachmentChoice(icon: "video.fill", title: "Видео", color: .purple)
+            }
+            Button {
+                withAnimation { showAttachmentMenu = false }
+                showFilePicker = true
+            } label: {
+                AttachmentChoice(icon: "doc.fill", title: "Файл", color: .orange)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.ocMuted.opacity(0.15)))
+        .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+        .padding(.horizontal, 12)
+    }
+
+    private func loadMedia(_ item: PhotosPickerItem, fallbackPrefix: String) {
+        withAnimation { showAttachmentMenu = false }
+        loadingMedia = true
+        Task {
+            defer {
+                loadingMedia = false
+                selectedPhoto = nil
+                selectedVideo = nil
+            }
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self) else {
+                    throw OnlineFiles.failure("Не удалось прочитать выбранное медиа")
+                }
+                let type = item.supportedContentTypes.first
+                let ext = type?.preferredFilenameExtension ?? (fallbackPrefix == "Фото" ? "jpg" : "mov")
+                let stamp = Int(Date().timeIntervalSince1970)
+                await store.sendPickedMedia(data, name: "\(fallbackPrefix)-\(stamp).\(ext)", to: peer)
+            } catch {
+                store.fileError = error.localizedDescription
+            }
+        }
+    }
+
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
         guard let last = items.last else { return }
         let action = { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -419,16 +492,28 @@ private struct OnlineMessageBubble: View {
         HStack(alignment: .bottom) {
             if outgoing { Spacer(minLength: 54) }
             VStack(alignment: .leading, spacing: 3) {
-                Text(message.previewText)
-                    .font(.system(size: 16))
-                    .foregroundColor(outgoing ? .ocPrimaryFg : .ocText)
                 if let attachment = message.attachment {
                     Button(action: onDownload) {
-                        Label("\(attachment.sizeText) · Открыть", systemImage: "arrow.down.doc")
-                            .font(.caption)
-                            .foregroundColor(outgoing ? .ocPrimaryFg : .ocPrimary)
+                        HStack(spacing: 11) {
+                            Image(systemName: attachment.iconName)
+                                .font(.system(size: 20, weight: .semibold))
+                                .frame(width: 42, height: 42)
+                                .background((outgoing ? Color.white : Color.ocPrimary).opacity(0.16))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(attachment.name).font(.system(size: 14, weight: .semibold)).lineLimit(2)
+                                Text("\(attachment.sizeText) · Нажмите, чтобы скачать").font(.caption2).opacity(0.72)
+                            }
+                            Image(systemName: "arrow.down.circle.fill").font(.title3)
+                        }
+                        .foregroundColor(outgoing ? .ocPrimaryFg : .ocText)
                     }
+                    .buttonStyle(.plain)
                     .disabled(message.serverID == nil)
+                } else {
+                    Text(message.text)
+                        .font(.system(size: 16))
+                        .foregroundColor(outgoing ? .ocPrimaryFg : .ocText)
                 }
                 HStack(spacing: 4) {
                     Spacer(minLength: 0)
@@ -445,6 +530,56 @@ private struct OnlineMessageBubble: View {
             .onTapGesture { if message.status == .failed { onRetry() } }
             if !outgoing { Spacer(minLength: 54) }
         }
+    }
+}
+
+private struct AttachmentChoice: View {
+    let icon: String
+    let title: String
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 21, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .background(color.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            Text(title).font(.caption).foregroundColor(.ocText)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct DownloadedOnlineFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct OnlineDownloadedFileSheet: View {
+    let file: DownloadedOnlineFile
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 44))
+                .foregroundStyle(Color.ocSuccess)
+            VStack(spacing: 5) {
+                Text("Файл загружен").font(.title3.bold())
+                Text(file.url.lastPathComponent).font(.subheadline).foregroundColor(.ocMuted).lineLimit(2)
+            }
+            ShareLink(item: file.url) {
+                Label("Открыть или сохранить", systemImage: "square.and.arrow.up")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .foregroundStyle(Color.ocPrimaryFg)
+                    .background(Color.ocPrimary, in: RoundedRectangle(cornerRadius: 14))
+            }
+            Button("Закрыть") { dismiss() }.foregroundStyle(Color.ocMuted)
+        }
+        .padding(24)
     }
 }
 

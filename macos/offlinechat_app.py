@@ -264,6 +264,30 @@ def receipt_mark(status):
     return {"sending": "···", "sent": "✓", "delivered": "✓✓", "read": "✓✓", "failed": "!"}.get(status or "", "")
 
 
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".heic", ".heif", ".webp", ".tif", ".tiff"}
+VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".webm"}
+
+
+def attachment_kind(filename):
+    extension = os.path.splitext(str(filename or ""))[1].lower()
+    if extension in PHOTO_EXTENSIONS:
+        return "photo"
+    if extension in VIDEO_EXTENSIONS:
+        return "video"
+    return "file"
+
+
+def attachment_icon(filename):
+    return {"photo": "▣", "video": "▶", "file": "▤"}[attachment_kind(filename)]
+
+
+def file_size_text(size):
+    value = max(0, int(size or 0))
+    if value >= 1024 * 1024:
+        return "%.1f МБ" % (value / (1024 * 1024))
+    return "%.0f КБ" % max(1, value / 1024)
+
+
 def is_control_body(text):
     value = str(text or "")
     return value == CTRL_TYPING or value.startswith(CTRL_DELIVERED) or value.startswith(CTRL_READ)
@@ -1348,6 +1372,7 @@ class App:
         self._list_dirty = False
         self._read_job = None
         self.modal_overlay = None
+        self.attachment_menu = None
         init_fonts(root)
         harden_tk(root)
         self.build()
@@ -1554,6 +1579,7 @@ class App:
             return
         for child in self.online.winfo_children():
             child.destroy()
+        self.attachment_menu = None
         self.online_transcript = None
         wrap = tk.Frame(self.online, bg=THEME["chat_bg"])
         wrap.place(relx=0.5, rely=0.5, anchor="center")
@@ -1650,7 +1676,9 @@ class App:
         bar.pack(fill="x")
         inner = tk.Frame(bar, bg=THEME["surface_alt"], highlightbackground=THEME["line"], highlightthickness=1)
         inner.pack(fill="x", padx=12, pady=10)
-        PillButton(inner, "Файл", command=self.send_online_file, width=64, height=36).pack(side="left", padx=6)
+        self.attachment_button = PillButton(inner, "📎", command=self.toggle_online_attachment_menu,
+                                            variant="ghost", width=42, height=36)
+        self.attachment_button.pack(side="left", padx=6, pady=6)
         self.online_entry = tk.Entry(inner, bg=THEME["surface_alt"], fg=THEME["text"], insertbackground=THEME["text"], disabledforeground=THEME["subtle"], selectbackground=THEME["primary"], selectforeground=THEME["primary_fg"], relief="flat", borderwidth=0, highlightthickness=0, font=ui_font(14))
         self.online_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=12)
         self.online_entry.bind("<Return>", lambda _e: self.send_online_msg())
@@ -1666,12 +1694,22 @@ class App:
         holder.pack(anchor="e" if outgoing else "w")
         bg = THEME["outgoing"] if outgoing else THEME["incoming"]
         fg = THEME["primary_fg"] if outgoing else THEME["text"]
-        tk.Label(holder, text=text, bg=bg, fg=fg, font=ui_font(13), wraplength=420, justify="left", padx=14, pady=10).pack()
         if attachment:
-            label = tk.Label(holder, text="Сохранить файл · %.1f КБ" % (attachment.get("size", 0) / 1024),
-                             bg=bg, fg=fg, cursor="hand2", padx=14, pady=6)
-            label.pack(fill="x")
-            label.bind("<Button-1>", lambda _event, mid=local_id: self.download_online_file(mid))
+            card = tk.Frame(holder, bg=bg, cursor="hand2", padx=12, pady=10)
+            card.pack(fill="x")
+            tk.Label(card, text=attachment_icon(attachment.get("name")), bg=bg, fg=fg,
+                     font=ui_font(22, "bold"), width=2).pack(side="left", padx=(0, 8))
+            details = tk.Frame(card, bg=bg)
+            details.pack(side="left", fill="x", expand=True)
+            tk.Label(details, text=attachment.get("name") or "Вложение", bg=bg, fg=fg,
+                     font=ui_font(13, "bold"), wraplength=310, justify="left").pack(anchor="w")
+            tk.Label(details, text=file_size_text(attachment.get("size")) + " · нажмите, чтобы скачать",
+                     bg=bg, fg=fg, font=ui_font(10)).pack(anchor="w", pady=(3, 0))
+            tk.Label(card, text="↓", bg=bg, fg=fg, font=ui_font(18, "bold")).pack(side="right", padx=(10, 0))
+            bind_click(card, lambda mid=local_id: self.download_online_file(mid))
+        else:
+            tk.Label(holder, text=text, bg=bg, fg=fg, font=ui_font(13), wraplength=420,
+                     justify="left", padx=14, pady=10).pack()
         if outgoing:
             mark_color = THEME["danger"] if status == "failed" else (THEME["accent"] if status == "read" else THEME["subtle"])
             mark = tk.Label(holder, text=receipt_mark(status or "sending"), bg=THEME["chat_bg"], fg=mark_color, font=ui_font(10), anchor="e")
@@ -1768,16 +1806,86 @@ class App:
             self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id)
         self._list_dirty = True
 
-    def send_online_file(self):
+    def toggle_online_attachment_menu(self):
+        if self.attachment_menu is not None:
+            self.close_online_attachment_menu()
+            return
+        if not hasattr(self, "online") or not self.active_online_chat:
+            return
+        try:
+            self.online_entry.focus_set()
+            self.root.focus_set()
+        except Exception:
+            pass
+        menu = tk.Frame(self.online, bg=THEME["surface"], highlightbackground=THEME["line"],
+                        highlightthickness=1, padx=8, pady=8)
+        self.attachment_menu = menu
+        for icon, title, kind in (("▣", "Фото", "photo"), ("▶", "Видео", "video"), ("▤", "Файл", "file")):
+            PillButton(menu, icon + "  " + title,
+                       command=lambda value=kind: self.choose_online_attachment(value),
+                       variant="secondary", width=108, height=42).pack(side="left", padx=4)
+        menu.place(x=16, rely=1.0, y=-22, anchor="sw")
+        menu.lift()
+        self._animate_attachment_menu(menu, -22, -78, -8)
+        if hasattr(self, "attachment_button"):
+            self.attachment_button.set_text("×")
+
+    def _animate_attachment_menu(self, menu, current, target, step, destroy=False):
+        if self.attachment_menu is not menu:
+            return
+        next_value = max(target, current + step) if step < 0 else min(target, current + step)
+        try:
+            menu.place_configure(y=next_value)
+        except Exception:
+            return
+        if next_value != target:
+            self.root.after(14, lambda: self._animate_attachment_menu(menu, next_value, target, step, destroy))
+        elif destroy:
+            menu.destroy()
+            self.attachment_menu = None
+
+    def close_online_attachment_menu(self):
+        menu = self.attachment_menu
+        if menu is None:
+            return
+        if hasattr(self, "attachment_button"):
+            self.attachment_button.set_text("📎")
+        self._animate_attachment_menu(menu, -78, -22, 8, destroy=True)
+
+    def choose_online_attachment(self, kind):
+        self.close_online_attachment_menu()
+        prompts = {"photo": "Выберите фотографию до 5 МБ",
+                   "video": "Выберите видео до 5 МБ", "file": "Выберите файл до 5 МБ"}
+        self.set_status("Выбор вложения", THEME["warning"], prompts.get(kind, prompts["file"]))
+
+        def choose():
+            script = "POSIX path of (choose file with prompt %s)" % json.dumps(prompts.get(kind, prompts["file"]), ensure_ascii=False)
+            try:
+                result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True,
+                                        stderr=subprocess.DEVNULL, check=False)
+                path = result.stdout.strip() if result.returncode == 0 else ""
+                if path:
+                    self.status_queue.put({"event": "online_file_chosen", "path": path, "file_kind": kind})
+            except Exception as error:
+                self.status_queue.put({"event": "online_file_error", "message": str(error)})
+
+        threading.Thread(target=choose, name="attachment-picker", daemon=True).start()
+
+    def send_online_file(self, kind="file"):
+        self.choose_online_attachment(kind)
+
+    def queue_online_file(self, path, kind="file"):
         if not self.active_online_chat or not self.online_username:
             return
-        path = filedialog.askopenfilename(title="Отправить файл до 5 МБ")
         if not path:
             return
         try:
             size = os.path.getsize(path)
             if not 0 < size <= 5 * 1024 * 1024:
                 raise ValueError("Выберите непустой файл размером до 5 МБ")
+            actual_kind = attachment_kind(path)
+            if kind in ("photo", "video") and actual_kind != kind:
+                raise ValueError("Выбранный файл не является %s" % ("фотографией" if kind == "photo" else "видео"))
         except (OSError, ValueError) as error:
             self.set_status("Файл не отправлен", THEME["danger"], str(error))
             return
@@ -1799,11 +1907,17 @@ class App:
             self.set_status("Файл ещё не отправлен", THEME["warning"], "Дождитесь отправки или повторите её")
             return
         attachment = item["attachment"]
-        destination = filedialog.asksaveasfilename(title="Сохранить файл", initialfile=os.path.basename(attachment["name"]))
-        if destination:
-            self.online_command_queue.put({"type": "online_download_file", "message_id": item["sid"],
-                                           "attachment": attachment, "destination": destination})
-            self.set_status("Скачивание…", THEME["warning"], attachment["name"])
+        downloads = os.path.expanduser("~/Downloads")
+        os.makedirs(downloads, exist_ok=True)
+        stem, extension = os.path.splitext(os.path.basename(attachment["name"]))
+        destination = os.path.join(downloads, stem + extension)
+        counter = 2
+        while os.path.exists(destination):
+            destination = os.path.join(downloads, "%s (%d)%s" % (stem, counter, extension))
+            counter += 1
+        self.online_command_queue.put({"type": "online_download_file", "message_id": item["sid"],
+                                       "attachment": attachment, "destination": destination})
+        self.set_status("Скачивание…", THEME["warning"], "Файл будет сохранён в «Загрузки»")
 
     def find_user(self):
         query = valid_username(self.find_entry.get() if hasattr(self, "find_entry") else "")
@@ -2527,8 +2641,16 @@ class App:
                     desktop_notify((self.online_profiles.get(peer) or {}).get("display_name") or "@" + peer, item.get("text", ""))
             self.schedule_save_chats()
             self._list_dirty = True
+        elif kind == "online_file_chosen":
+            self.queue_online_file(event.get("path", ""), event.get("file_kind", "file"))
         elif kind == "online_file_saved":
-            self.set_status("Файл сохранён", THEME["success"], event.get("path", ""))
+            saved_path = event.get("path", "")
+            self.set_status("Файл сохранён", THEME["success"], saved_path)
+            if saved_path:
+                try:
+                    subprocess.Popen(["open", "-R", saved_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
         elif kind == "online_file_error":
             self.set_status("Не удалось скачать", THEME["danger"], message)
         elif kind == "online_send_failed":

@@ -58,6 +58,19 @@ enum OnlineFiles {
         }.value
     }
 
+    static func stage(_ data: Data, name: String, id: UUID) async throws -> OnlineAttachment {
+        try await Task.detached(priority: .utility) {
+            guard safeName(name) else { throw failure("Недопустимое имя файла") }
+            guard !data.isEmpty, data.count <= limit else {
+                throw failure("Выберите файл размером до 5 МБ")
+            }
+            let directory = try folder(id)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: directory.appendingPathComponent(name), options: .atomic)
+            return OnlineAttachment(name: name, size: data.count, sha256: digest(data))
+        }.value
+    }
+
     static func encoded(_ attachment: OnlineAttachment, id: UUID) async throws -> String {
         try await Task.detached(priority: .utility) {
             guard safeName(attachment.name) else { throw failure("Недопустимое имя файла") }

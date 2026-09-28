@@ -327,6 +327,27 @@ final class OnlineChatStore: ObservableObject {
         }
     }
 
+    func sendPickedMedia(_ data: Data, name: String, to recipient: String) async {
+        guard !username.isEmpty, !preparingFile else { return }
+        preparingFile = true
+        fileError = ""
+        let id = UUID()
+        do {
+            let attachment = try await OnlineFiles.stage(data, name: name, id: id)
+            let message = OnlineMessage(clientID: id, sender: username, recipient: recipient,
+                                        text: "", createdAt: Date(), status: .sending, attachment: attachment)
+            remember(peer: recipient)
+            upsert(message)
+            persist()
+            preparingFile = false
+            await submit(message)
+        } catch {
+            preparingFile = false
+            fileError = error.localizedDescription
+            await OnlineFiles.removeStaged(id)
+        }
+    }
+
     func downloadFile(_ message: OnlineMessage) async -> URL? {
         fileError = ""
         do { return try await api.download(message, username: username, ownerToken: ownerToken) }

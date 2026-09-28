@@ -69,4 +69,10 @@ struct OfflineChatTests {
         #expect(!OnlineFiles.safeName("folder/file.txt"))
         #expect(!OnlineFiles.safeName("bad\nname"))
     }
+
+    @Test func attachmentKindsChooseUsefulCards() {
+        #expect(OnlineAttachment(name: "cat.HEIC", size: 1, sha256: "x").kind == "photo")
+        #expect(OnlineAttachment(name: "clip.mp4", size: 1, sha256: "x").kind == "video")
+        #expect(OnlineAttachment(name: "archive.zip", size: 1, sha256: "x").kind == "file")
+    }
 }
