@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
+import CoreTransferable
 
 struct OnlineMessengerView: View {
     @ObservedObject var store: OnlineChatStore
@@ -277,8 +278,9 @@ private struct OnlineChatView: View {
     @State private var showProfile = false
     @State private var showFilePicker = false
     @State private var showAttachmentMenu = false
-    @State private var selectedPhoto: PhotosPickerItem?
-    @State private var selectedVideo: PhotosPickerItem?
+    @State private var showMediaPicker = false
+    @State private var selectedMedia: PhotosPickerItem?
+    @State private var mediaKind: OnlineMediaKind = .photo
     @State private var downloadedFile: DownloadedOnlineFile?
     @State private var downloading = false
     @State private var loadingMedia = false
@@ -332,7 +334,6 @@ private struct OnlineChatView: View {
             }
             if downloading { ProgressView("Скачивание файла…").padding(8) }
             if store.preparingFile || loadingMedia { ProgressView("Подготовка вложения…").padding(8) }
-            if showAttachmentMenu { attachmentMenu.transition(.move(edge: .bottom).combined(with: .opacity)) }
             composer
         }
         .background(Color.ocChatBg)
@@ -366,18 +367,31 @@ private struct OnlineChatView: View {
             case .failure(let error): store.fileError = error.localizedDescription
             }
         }
+        .photosPicker(isPresented: $showMediaPicker, selection: $selectedMedia,
+                      matching: mediaKind == .photo ? .images : .videos,
+                      preferredItemEncoding: .automatic)
+        .confirmationDialog("Что отправить?", isPresented: $showAttachmentMenu, titleVisibility: .visible) {
+            Button("Фото", systemImage: "photo.fill") {
+                mediaKind = .photo
+                showMediaPicker = true
+            }
+            Button("Видео", systemImage: "video.fill") {
+                mediaKind = .video
+                showMediaPicker = true
+            }
+            Button("Файл", systemImage: "doc.fill") { showFilePicker = true }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Фото, видео или документ до 5 МБ")
+        }
         .sheet(item: $downloadedFile) { file in
             OnlineDownloadedFileSheet(file: file)
                 .presentationDetents([.height(280)])
                 .presentationDragIndicator(.visible)
         }
-        .onChange(of: selectedPhoto) { _, item in
+        .onChange(of: selectedMedia) { _, item in
             guard let item else { return }
-            loadMedia(item, fallbackPrefix: "Фото")
-        }
-        .onChange(of: selectedVideo) { _, item in
-            guard let item else { return }
-            loadMedia(item, fallbackPrefix: "Видео")
+            loadMedia(item)
         }
         .alert("Файлы", isPresented: Binding(get: { !store.fileError.isEmpty }, set: { if !$0 { store.fileError = "" } })) {
             Button("ОК") { store.fileError = "" }
@@ -388,12 +402,9 @@ private struct OnlineChatView: View {
         HStack(alignment: .bottom, spacing: 8) {
             Button {
                 composerFocused = false
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
-                    showAttachmentMenu.toggle()
-                }
+                showAttachmentMenu = true
             } label: {
                 Image(systemName: "paperclip").font(.title2).frame(width: 38, height: 42)
-                    .rotationEffect(.degrees(showAttachmentMenu ? 45 : 0))
             }
             .disabled(store.preparingFile || loadingMedia)
             .accessibilityLabel("Прикрепить фото, видео или файл до 5 МБ")
@@ -428,47 +439,30 @@ private struct OnlineChatView: View {
         .background(.ultraThinMaterial)
     }
 
-    private var attachmentMenu: some View {
-        HStack(spacing: 18) {
-            PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                AttachmentChoice(icon: "photo.fill", title: "Фото", color: .blue)
-            }
-            PhotosPicker(selection: $selectedVideo, matching: .videos) {
-                AttachmentChoice(icon: "video.fill", title: "Видео", color: .purple)
-            }
-            Button {
-                withAnimation { showAttachmentMenu = false }
-                showFilePicker = true
-            } label: {
-                AttachmentChoice(icon: "doc.fill", title: "Файл", color: .orange)
-            }
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 22)
-        .padding(.vertical, 14)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.ocMuted.opacity(0.15)))
-        .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
-        .padding(.horizontal, 12)
-    }
-
-    private func loadMedia(_ item: PhotosPickerItem, fallbackPrefix: String) {
-        withAnimation { showAttachmentMenu = false }
+    private func loadMedia(_ item: PhotosPickerItem) {
         loadingMedia = true
         Task {
             defer {
                 loadingMedia = false
-                selectedPhoto = nil
-                selectedVideo = nil
+                selectedMedia = nil
             }
             do {
-                guard let data = try await item.loadTransferable(type: Data.self) else {
-                    throw OnlineFiles.failure("Не удалось прочитать выбранное медиа")
+                if mediaKind == .video {
+                    guard let movie = try await item.loadTransferable(type: PickedOnlineMovie.self) else {
+                        throw OnlineFiles.failure("Не удалось прочитать выбранное видео")
+                    }
+                    let data = try await Task.detached(priority: .utility) { try OnlineFiles.read(movie.url) }.value
+                    defer { try? FileManager.default.removeItem(at: movie.url) }
+                    await store.sendPickedMedia(data, name: movie.url.lastPathComponent, to: peer)
+                } else {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        throw OnlineFiles.failure("Не удалось прочитать выбранную фотографию")
+                    }
+                    let type = item.supportedContentTypes.first
+                    let ext = type?.preferredFilenameExtension ?? "jpg"
+                    let stamp = Int(Date().timeIntervalSince1970)
+                    await store.sendPickedMedia(data, name: "Фото-\(stamp).\(ext)", to: peer)
                 }
-                let type = item.supportedContentTypes.first
-                let ext = type?.preferredFilenameExtension ?? (fallbackPrefix == "Фото" ? "jpg" : "mov")
-                let stamp = Int(Date().timeIntervalSince1970)
-                await store.sendPickedMedia(data, name: "\(fallbackPrefix)-\(stamp).\(ext)", to: peer)
             } catch {
                 store.fileError = error.localizedDescription
             }
@@ -533,27 +527,30 @@ private struct OnlineMessageBubble: View {
     }
 }
 
-private struct AttachmentChoice: View {
-    let icon: String
-    let title: String
-    let color: Color
-
-    var body: some View {
-        VStack(spacing: 7) {
-            Image(systemName: icon)
-                .font(.system(size: 21, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 48, height: 48)
-                .background(color.gradient, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-            Text(title).font(.caption).foregroundColor(.ocText)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
 private struct DownloadedOnlineFile: Identifiable {
     let id = UUID()
     let url: URL
+}
+
+private enum OnlineMediaKind {
+    case photo
+    case video
+}
+
+private struct PickedOnlineMovie: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { movie in
+            SentTransferredFile(movie.url)
+        } importing: { received in
+            let ext = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
+            let copy = FileManager.default.temporaryDirectory
+                .appendingPathComponent("Видео-\(UUID().uuidString).\(ext)")
+            try FileManager.default.copyItem(at: received.file, to: copy)
+            return PickedOnlineMovie(url: copy)
+        }
+    }
 }
 
 private struct OnlineDownloadedFileSheet: View {

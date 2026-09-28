@@ -75,4 +75,14 @@ struct OfflineChatTests {
         #expect(OnlineAttachment(name: "clip.mp4", size: 1, sha256: "x").kind == "video")
         #expect(OnlineAttachment(name: "archive.zip", size: 1, sha256: "x").kind == "file")
     }
+
+    @Test func pickedMediaCanBeStagedAndEncoded() async throws {
+        let id = UUID()
+        let original = Data([0, 1, 2, 3, 254, 255])
+        let attachment = try await OnlineFiles.stage(original, name: "Фото-test.jpg", id: id)
+        let encoded = try await OnlineFiles.encoded(attachment, id: id)
+        #expect(Data(base64Encoded: encoded) == original)
+        #expect(attachment.size == original.count)
+        await OnlineFiles.removeStaged(id)
+    }
 }

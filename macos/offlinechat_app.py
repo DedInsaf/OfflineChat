@@ -2,7 +2,7 @@ import queue
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import colorchooser
+from tkinter import colorchooser, filedialog
 import os
 import json
 import time
@@ -1823,7 +1823,7 @@ class App:
         for icon, title, kind in (("▣", "Фото", "photo"), ("▶", "Видео", "video"), ("▤", "Файл", "file")):
             PillButton(menu, icon + "  " + title,
                        command=lambda value=kind: self.choose_online_attachment(value),
-                       variant="secondary", width=108, height=42).pack(side="left", padx=4)
+                       variant="secondary", width=154, height=42).pack(fill="x", pady=4)
         menu.place(x=16, rely=1.0, y=-22, anchor="sw")
         menu.lift()
         self._animate_attachment_menu(menu, -22, -78, -8)
@@ -1857,19 +1857,21 @@ class App:
         prompts = {"photo": "Выберите фотографию до 5 МБ",
                    "video": "Выберите видео до 5 МБ", "file": "Выберите файл до 5 МБ"}
         self.set_status("Выбор вложения", THEME["warning"], prompts.get(kind, prompts["file"]))
-
-        def choose():
-            script = "POSIX path of (choose file with prompt %s)" % json.dumps(prompts.get(kind, prompts["file"]), ensure_ascii=False)
-            try:
-                result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True,
-                                        stderr=subprocess.DEVNULL, check=False)
-                path = result.stdout.strip() if result.returncode == 0 else ""
-                if path:
-                    self.status_queue.put({"event": "online_file_chosen", "path": path, "file_kind": kind})
-            except Exception as error:
-                self.status_queue.put({"event": "online_file_error", "message": str(error)})
-
-        threading.Thread(target=choose, name="attachment-picker", daemon=True).start()
+        try:
+            self.root.update_idletasks()
+            filetypes = {
+                "photo": [("Фотографии", "*.jpg *.jpeg *.png *.gif *.heic *.heif *.webp *.tif *.tiff"), ("Все файлы", "*.*")],
+                "video": [("Видео", "*.mov *.mp4 *.m4v *.avi *.mkv *.webm"), ("Все файлы", "*.*")],
+                "file": [("Все файлы", "*.*")],
+            }
+            path = filedialog.askopenfilename(parent=self.root, title=prompts.get(kind, prompts["file"]),
+                                              filetypes=filetypes.get(kind, filetypes["file"]))
+            if path:
+                self.queue_online_file(path, kind)
+            else:
+                self.set_status("Онлайн", THEME["success"], "Вложение не выбрано")
+        except Exception as error:
+            self.set_status("Не удалось открыть выбор", THEME["danger"], str(error))
 
     def send_online_file(self, kind="file"):
         self.choose_online_attachment(kind)
@@ -1968,27 +1970,19 @@ class App:
         photo_label.pack(side="left", padx=14)
 
         def choose_photo():
-            photo_label.config(text="Выберите изображение…", fg=THEME["warning"])
-
-            def choose_and_prepare():
-                script = "POSIX path of (choose file with prompt %s)" % json.dumps("Выберите фото профиля", ensure_ascii=False)
-                try:
-                    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True,
-                                            stderr=subprocess.DEVNULL, check=False)
-                    path = result.stdout.strip() if result.returncode == 0 else ""
-                    if not path:
-                        self.status_queue.put({"event": "online_profile_photo_cancelled", "label": photo_label})
-                        return
-                    if attachment_kind(path) != "photo":
-                        raise ValueError("Выбранный файл не является изображением")
-                    encoded = self.encode_avatar(path)
-                    self.status_queue.put({"event": "online_profile_photo_ready", "label": photo_label,
-                                           "state": avatar_state, "encoded": encoded})
-                except Exception as error:
-                    self.status_queue.put({"event": "online_profile_photo_error", "label": photo_label,
-                                           "message": str(error)})
-
-            threading.Thread(target=choose_and_prepare, name="profile-photo-picker", daemon=True).start()
+            path = filedialog.askopenfilename(
+                parent=self.root, title="Выберите фото профиля",
+                filetypes=[("Изображения", "*.jpg *.jpeg *.png *.heic *.heif *.webp"), ("Все файлы", "*.*")],
+            )
+            if not path:
+                return
+            try:
+                if attachment_kind(path) != "photo":
+                    raise ValueError("Выбранный файл не является изображением")
+                avatar_state["value"] = self.encode_avatar(path)
+                photo_label.config(text="Новое фото выбрано", fg=THEME["success"])
+            except Exception as error:
+                photo_label.config(text=str(error) or "Не удалось обработать фото", fg=THEME["danger"])
 
         PillButton(avatar_host, "Выбрать", command=choose_photo, variant="secondary", width=100, height=34).pack(side="right")
 
@@ -2649,22 +2643,6 @@ class App:
                     desktop_notify((self.online_profiles.get(peer) or {}).get("display_name") or "@" + peer, item.get("text", ""))
             self.schedule_save_chats()
             self._list_dirty = True
-        elif kind == "online_file_chosen":
-            self.queue_online_file(event.get("path", ""), event.get("file_kind", "file"))
-        elif kind in ("online_profile_photo_ready", "online_profile_photo_error", "online_profile_photo_cancelled"):
-            label = event.get("label")
-            try:
-                if not label or not label.winfo_exists():
-                    return
-                if kind == "online_profile_photo_ready":
-                    event["state"]["value"] = event.get("encoded")
-                    label.config(text="Новое фото выбрано", fg=THEME["success"])
-                elif kind == "online_profile_photo_cancelled":
-                    label.config(text="Фото не изменено", fg=THEME["muted"])
-                else:
-                    label.config(text=event.get("message") or "Не удалось обработать фото", fg=THEME["danger"])
-            except Exception as error:
-                log(f"avatar result: {error}")
         elif kind == "online_file_saved":
             saved_path = event.get("path", "")
             self.set_status("Файл сохранён", THEME["success"], saved_path)
