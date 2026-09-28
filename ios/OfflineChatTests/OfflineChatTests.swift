@@ -34,4 +34,39 @@ struct OfflineChatTests {
         #expect(message.peer(for: "anna") == "boris")
         #expect(message.peer(for: "boris") == "anna")
     }
+
+    @Test func attachmentSurvivesServerJSONRoundtrip() throws {
+        let json = """
+        {"client_id":"B5EE594A-7D2A-4A21-B15E-320D40CC4A8D","id":42,
+        "sender":"anna","recipient":"boris","body":"","status":"sent",
+        "created_at":"2026-09-28T10:00:00Z",
+        "attachment":{"name":"Документ.pdf","size":1234,"sha256":"abcd"}}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let message = try decoder.decode(OnlineMessage.self, from: json)
+        #expect(message.attachment?.name == "Документ.pdf")
+        #expect(message.previewText == "📎 Документ.pdf")
+        #expect(message.serverID == 42)
+    }
+
+    @Test func textMessageWithoutAttachmentRemainsCompatible() throws {
+        let json = """
+        {"client_id":"B5EE594A-7D2A-4A21-B15E-320D40CC4A8D","id":43,
+        "sender":"anna","recipient":"boris","body":"Привет","status":"delivered",
+        "created_at":"2026-09-28T10:00:00Z","attachment":null}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let message = try decoder.decode(OnlineMessage.self, from: json)
+        #expect(message.attachment == nil)
+        #expect(message.previewText == "Привет")
+    }
+
+    @Test func unsafeAttachmentNamesAreRejected() {
+        #expect(OnlineFiles.safeName("Документ.pdf"))
+        #expect(!OnlineFiles.safeName("../secret.txt"))
+        #expect(!OnlineFiles.safeName("folder/file.txt"))
+        #expect(!OnlineFiles.safeName("bad\nname"))
+    }
 }

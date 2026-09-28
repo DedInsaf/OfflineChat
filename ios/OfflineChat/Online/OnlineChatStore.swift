@@ -294,10 +294,23 @@ final class OnlineChatStore: ObservableObject {
         await submit(pending)
     }
 
-    func sendFile(_ url: URL, to recipient: String) async {
+    /// Must be called directly from fileImporter: security-scoped access has
+    /// to start before the system picker finishes handing the URL to us.
+    func sendPickedFile(_ url: URL, to recipient: String) {
         guard !username.isEmpty, !preparingFile else { return }
         preparingFile = true
+        fileError = ""
         let id = UUID()
+        let hasSecurityAccess = url.startAccessingSecurityScopedResource()
+        Task { [weak self] in
+            defer {
+                if hasSecurityAccess { url.stopAccessingSecurityScopedResource() }
+            }
+            await self?.prepareAndSendFile(url, to: recipient, id: id)
+        }
+    }
+
+    private func prepareAndSendFile(_ url: URL, to recipient: String, id: UUID) async {
         do {
             let attachment = try await OnlineFiles.stage(url, id: id)
             let message = OnlineMessage(clientID: id, sender: username, recipient: recipient,
@@ -315,6 +328,7 @@ final class OnlineChatStore: ObservableObject {
     }
 
     func downloadFile(_ message: OnlineMessage) async -> URL? {
+        fileError = ""
         do { return try await api.download(message, username: username, ownerToken: ownerToken) }
         catch { fileError = error.localizedDescription; return nil }
     }

@@ -355,7 +355,7 @@ private struct OnlineChatView: View {
         .onDisappear { store.closedChat(with: peer) }
         .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.item]) { result in
             switch result {
-            case .success(let url): Task { await store.sendFile(url, to: peer) }
+            case .success(let url): store.sendPickedFile(url, to: peer)
             case .failure(let error): store.fileError = error.localizedDescription
             }
         }
@@ -426,6 +426,7 @@ private struct OnlineMessageBubble: View {
                     Button(action: onDownload) {
                         Label("\(attachment.sizeText) · Открыть", systemImage: "arrow.down.doc")
                             .font(.caption)
+                            .foregroundColor(outgoing ? .ocPrimaryFg : .ocPrimary)
                     }
                     .disabled(message.serverID == nil)
                 }

@@ -48,9 +48,9 @@ final class OnlineAPI {
     init(root: URL? = OnlineAPI.configuredRoot, session: URLSession? = nil) {
         self.root = root
         let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 35
-        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 180
+        configuration.waitsForConnectivity = true
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpMaximumConnectionsPerHost = 4
         self.session = session ?? URLSession(configuration: configuration)
@@ -211,6 +211,7 @@ final class OnlineAPI {
             url.appendPathComponent(String(component))
         }
         var request = URLRequest(url: url)
+        request.timeoutInterval = endpoint == "messages/send" || endpoint == "files/download" ? 150 : 35
         request.httpMethod = "POST"
         request.httpBody = try encoder.encode(body)
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")

@@ -24,7 +24,7 @@ enum OnlineFiles {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func read(_ url: URL) throws -> Data {
+    private static func readDirect(_ url: URL) throws -> Data {
         let stream = try FileHandle(forReadingFrom: url)
         defer { try? stream.close() }
         let data = try stream.read(upToCount: limit + 1) ?? Data()
@@ -34,10 +34,21 @@ enum OnlineFiles {
         return data
     }
 
+    /// File-provider URLs (iCloud Drive, Google Drive and others) must be
+    /// coordinated while the security-scoped access is still active.
+    static func read(_ url: URL) throws -> Data {
+        var coordinationError: NSError?
+        var readResult: Result<Data, Error>?
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+            readResult = Result { try readDirect(coordinatedURL) }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let readResult else { throw failure("Не удалось получить файл из приложения «Файлы»") }
+        return try readResult.get()
+    }
+
     static func stage(_ source: URL, id: UUID) async throws -> OnlineAttachment {
         try await Task.detached(priority: .utility) {
-            let access = source.startAccessingSecurityScopedResource()
-            defer { if access { source.stopAccessingSecurityScopedResource() } }
             guard safeName(source.lastPathComponent) else { throw failure("Недопустимое имя файла") }
             let data = try read(source)
             let directory = try folder(id)
