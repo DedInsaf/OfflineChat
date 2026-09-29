@@ -1,7 +1,6 @@
 import json
 import os
 import tempfile
-import uuid
 
 from .models import valid_username
 
@@ -80,14 +79,20 @@ def save_username(value):
     _safe_write(USER_PATH, {"username": valid_username(value) or ""})
 
 
-def load_owner_token():
+def load_session_token():
     value = _load(CREDENTIAL_PATH, {})
-    token = value.get("owner_token") if isinstance(value, dict) else None
+    token = value.get("session_token") if isinstance(value, dict) else None
     if isinstance(token, str) and len(token) >= 32:
         return token
-    token = str(uuid.uuid4()) + str(uuid.uuid4())
-    _safe_write(CREDENTIAL_PATH, {"owner_token": token}, mode=0o600)
-    return token
+    return ""
+
+
+def save_session_token(token):
+    return _safe_write(CREDENTIAL_PATH, {"session_token": str(token or "")}, mode=0o600)
+
+
+def clear_session_token():
+    return _safe_write(CREDENTIAL_PATH, {}, mode=0o600)
 
 
 def load_cursor(username):

@@ -14,6 +14,11 @@ struct OnlineMessengerView: View {
     @State private var showProfileEditor = false
     @State private var usernameDraft = ""
     @State private var nameDraft = ""
+    @State private var emailDraft = ""
+    @State private var passwordDraft = ""
+    @State private var confirmationDraft = ""
+    @State private var codeDraft = ""
+    @State private var registering = false
     @State private var showServer = false
     @State private var serverDraft = ""
 
@@ -96,29 +101,63 @@ struct OnlineMessengerView: View {
             Image(systemName: "paperplane.fill")
                 .font(.system(size: 46))
                 .foregroundColor(.ocPrimary)
-            Text("Вход или регистрация")
+            Text(store.authChallenge == nil ? (registering ? "Регистрация" : "Вход") : "Код из письма")
                 .font(.system(size: 34, weight: .bold))
                 .foregroundColor(.ocText)
-            Text("Введите @username. Новый адрес будет зарегистрирован, а созданный ранее на этом iPhone — открыт снова.")
+            Text(authDescription)
                 .font(.system(size: 15))
                 .foregroundColor(.ocMuted)
-            TextField("Имя", text: $nameDraft)
-                .onlineField()
-            TextField("username", text: $usernameDraft)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .onlineField()
+            if store.authChallenge != nil {
+                TextField("6-значный код", text: $codeDraft)
+                    .keyboardType(.numberPad)
+                    .textContentType(.oneTimeCode)
+                    .onlineField()
+            } else {
+                if registering {
+                    TextField("Имя", text: $nameDraft).onlineField()
+                }
+                TextField(registering ? "username" : "Юз или почта", text: $usernameDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .onlineField()
+                if registering {
+                    TextField("Почта", text: $emailDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.emailAddress)
+                        .textContentType(.emailAddress)
+                        .onlineField()
+                }
+                SecureField("Пароль", text: $passwordDraft)
+                    .textContentType(registering ? .newPassword : .password)
+                    .onlineField()
+                if registering {
+                    SecureField("Подтвердите пароль", text: $confirmationDraft)
+                        .textContentType(.newPassword)
+                        .onlineField()
+                }
+            }
             if !store.claimError.isEmpty {
                 Text(store.claimError)
                     .font(.system(size: 13))
                     .foregroundColor(.ocDanger)
             }
             Button {
-                Task { await store.claim(usernameDraft, displayName: nameDraft) }
+                Task {
+                    if store.authChallenge != nil {
+                        await store.verifyCode(codeDraft)
+                    } else if registering {
+                        await store.startRegistration(username: usernameDraft, email: emailDraft,
+                                                      password: passwordDraft, confirmation: confirmationDraft,
+                                                      displayName: nameDraft)
+                    } else {
+                        await store.startLogin(identifier: usernameDraft, password: passwordDraft)
+                    }
+                }
             } label: {
                 HStack {
                     if store.isWorking { ProgressView().tint(.ocPrimaryFg) }
-                    Text("Войти / зарегистрироваться").fontWeight(.bold)
+                    Text(store.authChallenge != nil ? "Подтвердить" : "Получить код").fontWeight(.bold)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)
@@ -127,10 +166,33 @@ struct OnlineMessengerView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .disabled(store.isWorking)
+            if store.authChallenge != nil {
+                Button("Назад") {
+                    store.cancelVerification()
+                    codeDraft = ""
+                }
+                .foregroundColor(.ocAccent)
+            } else {
+                Button(registering ? "У меня уже есть аккаунт" : "Создать аккаунт") {
+                    registering.toggle()
+                    store.claimError = ""
+                }
+                .foregroundColor(.ocAccent)
+            }
             Spacer()
         }
         .padding(24)
         .background(Color.ocChatBg.ignoresSafeArea())
+    }
+
+    private var authDescription: String {
+        if let challenge = store.authChallenge {
+            return "Мы отправили шестизначный код на \(challenge.emailHint). Код действует 10 минут."
+        }
+        if registering {
+            return "Придумайте уникальный юз и пароль. Почту нужно подтвердить кодом."
+        }
+        return "Введите юз или почту и пароль. Для безопасности вход подтверждается кодом из письма."
     }
 
     private var conversationList: some View {
@@ -1117,7 +1179,7 @@ struct OnlineAccountView: View {
                 }
                 Button("Отмена", role: .cancel) {}
             } message: {
-                Text("Переписка останется на сервере. Для повторного входа понадобится тот же @username на этом устройстве.")
+                Text("Переписка останется на сервере. Для повторного входа понадобятся пароль и код из письма.")
             }
         }
     }

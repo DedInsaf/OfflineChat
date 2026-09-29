@@ -61,6 +61,8 @@ final class OnlineChatStore: ObservableObject {
     @Published var fileError = ""
     @Published private(set) var preparingFile = false
     @Published var claimError = ""
+    @Published private(set) var authChallenge: OnlineAuthChallenge?
+    @Published private(set) var authIsRegistration = false
     @Published var searchError = ""
     @Published private(set) var searchResults: [OnlineProfile] = []
 
@@ -71,7 +73,7 @@ final class OnlineChatStore: ObservableObject {
     private let localStore = OnlineLocalStore()
     private let defaults = UserDefaults.standard
     private let usernameKey = "onlinechat.username.v3"
-    private var ownerToken: String
+    private var sessionToken: String
     private var cursor: Int64 = 0
     private var syncTask: Task<Void, Never>?
     private var syncInFlight = false
@@ -82,7 +84,8 @@ final class OnlineChatStore: ObservableObject {
         self.api = api
         self.serverAddress = api.root?.absoluteString ?? ""
         username = UsernameRules.normalized(defaults.string(forKey: usernameKey) ?? "")
-        ownerToken = OnlineCredentials.ownerToken()
+        sessionToken = OnlineCredentials.sessionToken()
+        if sessionToken.isEmpty { username = "" }
 
         if let cache = localStore.load() {
             cursor = cache.cursor
@@ -120,9 +123,6 @@ final class OnlineChatStore: ObservableObject {
         do {
             try await candidate.checkConnection()
             // Authenticate before switching so an unrelated empty server cannot inherit our cursor.
-            if !username.isEmpty {
-                _ = try await candidate.claim(username: username, displayName: myProfile?.displayName ?? username, ownerToken: ownerToken)
-            }
             let previous = syncTask
             previous?.cancel()
             await previous?.value
@@ -180,6 +180,10 @@ final class OnlineChatStore: ObservableObject {
     }
 
     func logout() {
+        let tokenToRevoke = sessionToken
+        if !tokenToRevoke.isEmpty {
+            Task { try? await api.logout(sessionToken: tokenToRevoke) }
+        }
         syncTask?.cancel()
         syncTask = nil
         syncInFlight = false
@@ -195,11 +199,15 @@ final class OnlineChatStore: ObservableObject {
         claimError = ""
         searchError = ""
         connectionText = "Не подключено"
+        sessionToken = ""
+        authChallenge = nil
+        OnlineCredentials.clearSessionToken()
         defaults.removeObject(forKey: usernameKey)
         persist()
     }
 
-    func claim(_ rawUsername: String, displayName: String) async {
+    func startRegistration(username rawUsername: String, email: String, password: String,
+                           confirmation: String, displayName: String) async {
         guard let wanted = UsernameRules.validate(rawUsername) else {
             claimError = "От 3 до 20 символов: латинские буквы, цифры и _. Первый символ — буква."
             return
@@ -207,15 +215,46 @@ final class OnlineChatStore: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         do {
-            let profile = try await api.claim(
-                username: wanted,
-                displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
-                ownerToken: ownerToken
+            authChallenge = try await api.startRegistration(
+                username: wanted, email: email.trimmingCharacters(in: .whitespacesAndNewlines),
+                password: password, confirmation: confirmation,
+                displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines)
             )
-            username = profile.username
-            myProfile = profile
-            profiles[profile.username] = profile
+            authIsRegistration = true
+            claimError = ""
+        } catch {
+            claimError = error.localizedDescription
+        }
+    }
+
+    func startLogin(identifier: String, password: String) async {
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            authChallenge = try await api.startLogin(
+                identifier: identifier.trimmingCharacters(in: .whitespacesAndNewlines), password: password
+            )
+            authIsRegistration = false
+            claimError = ""
+        } catch {
+            claimError = error.localizedDescription
+        }
+    }
+
+    func verifyCode(_ code: String) async {
+        guard let challenge = authChallenge else { return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let result = try await api.verify(challengeID: challenge.challengeID, code: code,
+                                              registration: authIsRegistration)
+            sessionToken = result.sessionToken
+            OnlineCredentials.saveSessionToken(sessionToken)
+            username = result.profile.username
+            myProfile = result.profile
+            profiles = [result.profile.username: result.profile]
             defaults.set(username, forKey: usernameKey)
+            authChallenge = nil
             claimError = ""
             cursor = 0
             messages = [:]
@@ -226,6 +265,11 @@ final class OnlineChatStore: ObservableObject {
         } catch {
             claimError = error.localizedDescription
         }
+    }
+
+    func cancelVerification() {
+        authChallenge = nil
+        claimError = ""
     }
 
     func updateProfile(username newRawUsername: String, displayName: String, bio: String, avatarBase64: String?) async -> Bool {
@@ -243,7 +287,7 @@ final class OnlineChatStore: ObservableObject {
                 displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
                 bio: String(bio.trimmingCharacters(in: .whitespacesAndNewlines).prefix(160)),
                 avatarBase64: avatarBase64,
-                ownerToken: ownerToken
+                sessionToken: sessionToken
             )
             username = profile.username
             myProfile = profile
@@ -370,7 +414,7 @@ final class OnlineChatStore: ObservableObject {
 
     func downloadFile(_ message: OnlineMessage, reportErrors: Bool = true) async -> URL? {
         if reportErrors { fileError = "" }
-        do { return try await api.download(message, username: username, ownerToken: ownerToken) }
+        do { return try await api.download(message, username: username, sessionToken: sessionToken) }
         catch {
             if reportErrors { fileError = error.localizedDescription }
             return nil
@@ -392,7 +436,7 @@ final class OnlineChatStore: ObservableObject {
         guard now.timeIntervalSince(lastTypingSent[recipient] ?? .distantPast) > 2 else { return }
         lastTypingSent[recipient] = now
         Task {
-            try? await api.setTyping(username: username, recipient: recipient, ownerToken: ownerToken)
+            try? await api.setTyping(username: username, recipient: recipient, sessionToken: sessionToken)
         }
     }
 
@@ -403,7 +447,7 @@ final class OnlineChatStore: ObservableObject {
         }
         guard !ids.isEmpty else { return }
         do {
-            try await api.acknowledge(username: username, ownerToken: ownerToken, messageIDs: ids, status: .read)
+            try await api.acknowledge(username: username, sessionToken: sessionToken, messageIDs: ids, status: .read)
             var list = messages[peer] ?? []
             for index in list.indices where !list[index].isOutgoing(for: username) {
                 list[index].status = .read
@@ -415,21 +459,11 @@ final class OnlineChatStore: ObservableObject {
         }
     }
 
-    private func restoreIdentity() async {
-        guard myProfile == nil, !username.isEmpty else { return }
-        do {
-            let profile = try await api.claim(username: username, displayName: username, ownerToken: ownerToken)
-            myProfile = profile
-            profiles[profile.username] = profile
-            claimError = ""
-        } catch {
-            claimError = error.localizedDescription
-        }
-    }
+    private func restoreIdentity() async { await synchronize() }
 
     private func submit(_ message: OnlineMessage) async {
         do {
-            let saved = try await api.send(message, ownerToken: ownerToken)
+            let saved = try await api.send(message, sessionToken: sessionToken)
             upsert(saved)
             if message.attachment != nil { await OnlineFiles.removeStaged(message.clientID) }
             connectionText = "Онлайн"
@@ -448,7 +482,7 @@ final class OnlineChatStore: ObservableObject {
         syncInFlight = true
         defer { syncInFlight = false }
         do {
-            let response = try await api.sync(username: username, ownerToken: ownerToken, after: cursor)
+            let response = try await api.sync(username: username, sessionToken: sessionToken, after: cursor)
             try Task.checkCancellation()
             var deliveredIDs: [Int64] = []
             for profile in response.profiles {
@@ -473,11 +507,16 @@ final class OnlineChatStore: ObservableObject {
             connectionText = "Онлайн"
             claimError = ""
             if !deliveredIDs.isEmpty {
-                try await api.acknowledge(username: username, ownerToken: ownerToken, messageIDs: deliveredIDs, status: .delivered)
+                try await api.acknowledge(username: username, sessionToken: sessionToken, messageIDs: deliveredIDs, status: .delivered)
             }
             if let openPeer { await markRead(peer: openPeer) }
             persist()
         } catch {
+            if case let OnlineAPIError.server(status, _) = error, status == 401 {
+                logout()
+                claimError = "Сессия закончилась. Войдите снова"
+                return
+            }
             connectionText = "Нет связи"
             if claimError.isEmpty { claimError = error.localizedDescription }
         }

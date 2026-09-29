@@ -9,14 +9,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .database import ChatDatabase, ChatDatabaseError
+from .emailer import EmailDeliveryError, configured_code_sender
 
 
 MAX_BODY_BYTES = 7_100_000  # 5 MiB file encoded as base64 plus JSON metadata
 
 
 class ServerState:
-    def __init__(self, database):
+    def __init__(self, database, code_sender=None):
         self.database = database
+        self.code_sender = code_sender or configured_code_sender()
         self.condition = threading.Condition()
         self.generation = 0
         self.typing = {}
@@ -88,15 +90,42 @@ class ChatHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path.rstrip("/")
         try:
             body = self._json_body()
-            if path == "/v1/profile/claim":
-                result = self.state.database.claim(
-                    body.get("username"), body.get("display_name"), body.get("owner_token")
+            if path == "/v1/auth/register/start":
+                result, address, code = self.state.database.start_registration(
+                    body.get("username"), body.get("email"), body.get("password"),
+                    body.get("password_confirmation"), body.get("display_name"),
+                )
+                try:
+                    self.state.code_sender.send_code(address, code, "register")
+                except Exception:
+                    self.state.database.cancel_challenge(result["challenge_id"])
+                    raise
+            elif path == "/v1/auth/register/verify":
+                result = self.state.database.verify_challenge(
+                    body.get("challenge_id"), body.get("code"), "register"
                 )
                 self.state.notify()
+            elif path == "/v1/auth/login/start":
+                result, address, code = self.state.database.start_login(
+                    body.get("identifier"), body.get("password")
+                )
+                try:
+                    self.state.code_sender.send_code(address, code, "login")
+                except Exception:
+                    self.state.database.cancel_challenge(result["challenge_id"])
+                    raise
+            elif path == "/v1/auth/login/verify":
+                result = self.state.database.verify_challenge(
+                    body.get("challenge_id"), body.get("code"), "login"
+                )
+            elif path == "/v1/auth/logout":
+                result = self.state.database.logout(body.get("session_token"))
+            elif path == "/v1/profile/claim":
+                raise ChatDatabaseError("old sign-in method is disabled; update the app", 410)
             elif path == "/v1/profile/update":
                 result = self.state.database.update_profile(
                     body.get("username"), body.get("new_username"), body.get("display_name"),
-                    body.get("bio"), body.get("avatar_base64"), body.get("owner_token"),
+                    body.get("bio"), body.get("avatar_base64"), body.get("session_token"),
                 )
                 self.state.notify()
             elif path == "/v1/profile/search":
@@ -104,30 +133,30 @@ class ChatHandler(BaseHTTPRequestHandler):
             elif path == "/v1/messages/send":
                 result, changed = self.state.database.send(
                     body.get("sender"), body.get("recipient"), body.get("client_id"),
-                    body.get("body"), body.get("owner_token"),
+                    body.get("body"), body.get("session_token"),
                     body.get("attachment"),
                 )
                 if changed:
                     self.state.notify()
             elif path == "/v1/files/download":
                 result = self.state.database.download(
-                    body.get("username"), body.get("owner_token"), body.get("message_id")
+                    body.get("username"), body.get("session_token"), body.get("message_id")
                 )
             elif path == "/v1/messages/ack":
                 result, changed = self.state.database.acknowledge(
-                    body.get("username"), body.get("owner_token"), body.get("message_ids"), body.get("status")
+                    body.get("username"), body.get("session_token"), body.get("message_ids"), body.get("status")
                 )
                 if changed:
                     self.state.notify()
             elif path == "/v1/typing":
                 sender = str(body.get("username") or "")
                 recipient = str(body.get("recipient") or "")
-                self.state.database.sync(sender, body.get("owner_token"), 0)
+                self.state.database.sync(sender, body.get("session_token"), 0)
                 self.state.set_typing(sender, recipient)
                 result = True
             elif path == "/v1/sync":
                 username = str(body.get("username") or "")
-                token = body.get("owner_token")
+                token = body.get("session_token")
                 cursor = body.get("after_event") or 0
                 wait_ms = min(25_000, max(0, int(body.get("wait_ms") or 0)))
                 with self.state.condition:
@@ -151,6 +180,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             self._send(200, result)
         except ChatDatabaseError as error:
             self._send(error.status, {"error": str(error)})
+        except EmailDeliveryError as error:
+            self._send(503, {"error": str(error)})
         except (TypeError, ValueError) as error:
             self._send(400, {"error": str(error) or "invalid request"})
         except Exception as error:

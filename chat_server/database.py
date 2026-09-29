@@ -1,8 +1,10 @@
 import hashlib
+import hmac
 import base64
 import binascii
 import json
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -10,6 +12,7 @@ from datetime import datetime, timezone
 
 
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,19}$")
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 STATUS_RANK = {"sent": 1, "delivered": 2, "read": 3}
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_ATTACHMENT_STORAGE = 100 * 1024 * 1024
@@ -37,6 +40,26 @@ def _token_hash(token):
     if len(value) < 32:
         raise ChatDatabaseError("invalid owner token", 401)
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _email(value):
+    address = str(value or "").strip().lower()
+    if len(address) > 254 or not EMAIL_RE.fullmatch(address):
+        raise ChatDatabaseError("invalid email address")
+    return address
+
+
+def _password(value):
+    password = str(value or "")
+    if len(password) < 10 or len(password) > 128:
+        raise ChatDatabaseError("password must contain 10 to 128 characters")
+    if not any(char.isalpha() for char in password) or not any(char.isdigit() for char in password):
+        raise ChatDatabaseError("password must contain letters and numbers")
+    return password
+
+
+def _password_digest(password, salt, iterations=310_000):
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
 
 
 class ChatDatabase:
@@ -92,6 +115,43 @@ class ChatDatabase:
                     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                     content BLOB NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS auth_accounts (
+                    username TEXT PRIMARY KEY REFERENCES profiles(name) ON UPDATE CASCADE ON DELETE CASCADE,
+                    email TEXT NOT NULL UNIQUE,
+                    password_salt BLOB NOT NULL,
+                    password_hash BLOB NOT NULL,
+                    password_iterations INTEGER NOT NULL,
+                    verified_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS auth_challenges (
+                    id TEXT PRIMARY KEY,
+                    purpose TEXT NOT NULL CHECK(purpose IN ('register', 'login')),
+                    username TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    display_name TEXT,
+                    password_salt BLOB,
+                    password_hash BLOB,
+                    password_iterations INTEGER,
+                    code_hash TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS auth_challenges_expiry ON auth_challenges(expires_at);
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    username TEXT NOT NULL REFERENCES profiles(name) ON UPDATE CASCADE ON DELETE CASCADE,
+                    expires_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions(username);
+                CREATE TABLE IF NOT EXISTS auth_login_attempts (
+                    identity TEXT PRIMARY KEY,
+                    failures INTEGER NOT NULL,
+                    blocked_until INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
                 """
             )
             columns = {row[1] for row in self.connection.execute("PRAGMA table_info(messages)")}
@@ -128,13 +188,195 @@ class ChatDatabase:
         }
 
     def _owned_profile(self, username, owner_token):
-        name = _username(username)
-        row = self.connection.execute("SELECT * FROM profiles WHERE name = ?", (name,)).fetchone()
-        if row is None:
-            raise ChatDatabaseError("profile not found", 404)
-        if row["owner_hash"] != _token_hash(owner_token):
-            raise ChatDatabaseError("invalid owner token", 403)
+        row = self._authenticated_profile(owner_token)
+        if row["name"] != _username(username):
+            raise ChatDatabaseError("session does not belong to this account", 403)
         return row
+
+    def _authenticated_profile(self, session_token):
+        token_hash = _token_hash(session_token)
+        now = int(time.time())
+        row = self.connection.execute(
+            "SELECT p.* FROM auth_sessions s JOIN profiles p ON p.name = s.username "
+            "WHERE s.token_hash = ? AND s.expires_at > ?", (token_hash, now)
+        ).fetchone()
+        if row is None:
+            raise ChatDatabaseError("session expired or invalid", 401)
+        return row
+
+    @staticmethod
+    def _challenge_hash(challenge_id, code):
+        return hashlib.sha256((challenge_id + ":" + str(code)).encode("utf-8")).hexdigest()
+
+    def _new_session(self, username):
+        token = secrets.token_urlsafe(48)
+        now = int(time.time())
+        self.connection.execute(
+            "INSERT INTO auth_sessions(token_hash, username, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (_token_hash(token), username, now + 30 * 24 * 60 * 60, now),
+        )
+        return token
+
+    def _clear_expired_auth(self):
+        now = int(time.time())
+        self.connection.execute("DELETE FROM auth_challenges WHERE expires_at <= ?", (now,))
+        self.connection.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now,))
+        self.connection.commit()
+
+    def start_registration(self, username, email, password, password_confirmation, display_name=None):
+        name = _username(username)
+        address = _email(email)
+        secret = _password(password)
+        if secret != str(password_confirmation or ""):
+            raise ChatDatabaseError("passwords do not match")
+        title = str(display_name or "").strip()[:80] or name
+        salt = secrets.token_bytes(16)
+        iterations = 310_000
+        digest = _password_digest(secret, salt, iterations)
+        challenge_id = secrets.token_urlsafe(32)
+        code = "%06d" % secrets.randbelow(1_000_000)
+        now = int(time.time())
+        with self.lock:
+            self._clear_expired_auth()
+            if self.connection.execute("SELECT 1 FROM profiles WHERE name = ?", (name,)).fetchone():
+                raise ChatDatabaseError("username is already taken", 409)
+            if self.connection.execute("SELECT 1 FROM auth_accounts WHERE email = ?", (address,)).fetchone():
+                raise ChatDatabaseError("email is already registered", 409)
+            recent = self.connection.execute(
+                "SELECT created_at FROM auth_challenges WHERE username = ? OR email = ? ORDER BY created_at DESC LIMIT 1",
+                (name, address),
+            ).fetchone()
+            if recent is not None and int(recent["created_at"]) > now - 60:
+                raise ChatDatabaseError("wait before requesting another code", 429)
+            self.connection.execute("DELETE FROM auth_challenges WHERE username = ? OR email = ?", (name, address))
+            self.connection.execute(
+                "INSERT INTO auth_challenges(id, purpose, username, email, display_name, password_salt, "
+                "password_hash, password_iterations, code_hash, expires_at, created_at) "
+                "VALUES (?, 'register', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (challenge_id, name, address, title, salt, digest, iterations,
+                 self._challenge_hash(challenge_id, code), now + 600, now),
+            )
+            self.connection.commit()
+        return {"challenge_id": challenge_id, "email_hint": self._email_hint(address), "expires_in": 600}, address, code
+
+    def start_login(self, identifier, password):
+        identity = str(identifier or "").strip().lower().lstrip("@")
+        secret = str(password or "")
+        with self.lock:
+            self._clear_expired_auth()
+            attempt = self.connection.execute(
+                "SELECT * FROM auth_login_attempts WHERE identity = ?", (identity,)
+            ).fetchone()
+            if attempt is not None and int(attempt["blocked_until"]) > int(time.time()):
+                raise ChatDatabaseError("too many login attempts; try again later", 429)
+            row = self.connection.execute(
+                "SELECT a.*, p.display_name FROM auth_accounts a JOIN profiles p ON p.name = a.username "
+                "WHERE a.username = ? OR a.email = ?", (identity, identity)
+            ).fetchone()
+            if row is None:
+                self._record_login_failure(identity)
+                raise ChatDatabaseError("invalid username/email or password", 401)
+            actual = _password_digest(secret, row["password_salt"], int(row["password_iterations"]))
+            if not hmac.compare_digest(actual, row["password_hash"]):
+                self._record_login_failure(identity)
+                raise ChatDatabaseError("invalid username/email or password", 401)
+            self.connection.execute("DELETE FROM auth_login_attempts WHERE identity IN (?, ?, ?)",
+                                    (identity, row["username"], row["email"]))
+            recent = self.connection.execute(
+                "SELECT created_at FROM auth_challenges WHERE username = ? ORDER BY created_at DESC LIMIT 1",
+                (row["username"],),
+            ).fetchone()
+            if recent is not None and int(recent["created_at"]) > int(time.time()) - 60:
+                self.connection.commit()
+                raise ChatDatabaseError("wait before requesting another code", 429)
+            challenge_id = secrets.token_urlsafe(32)
+            code = "%06d" % secrets.randbelow(1_000_000)
+            now = int(time.time())
+            self.connection.execute("DELETE FROM auth_challenges WHERE username = ?", (row["username"],))
+            self.connection.execute(
+                "INSERT INTO auth_challenges(id, purpose, username, email, display_name, code_hash, expires_at, created_at) "
+                "VALUES (?, 'login', ?, ?, ?, ?, ?, ?)",
+                (challenge_id, row["username"], row["email"], row["display_name"],
+                 self._challenge_hash(challenge_id, code), now + 600, now),
+            )
+            self.connection.commit()
+        return {"challenge_id": challenge_id, "email_hint": self._email_hint(row["email"]), "expires_in": 600}, row["email"], code
+
+    def _record_login_failure(self, identity):
+        now = int(time.time())
+        row = self.connection.execute("SELECT failures, updated_at FROM auth_login_attempts WHERE identity = ?",
+                                      (identity,)).fetchone()
+        failures = 1 if row is None or int(row["updated_at"]) < now - 900 else int(row["failures"]) + 1
+        blocked_until = now + 900 if failures >= 5 else 0
+        self.connection.execute(
+            "INSERT INTO auth_login_attempts(identity, failures, blocked_until, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(identity) DO UPDATE SET failures=excluded.failures, "
+            "blocked_until=excluded.blocked_until, updated_at=excluded.updated_at",
+            (identity, failures, blocked_until, now),
+        )
+        self.connection.commit()
+
+    @staticmethod
+    def _email_hint(address):
+        local, domain = address.split("@", 1)
+        return (local[:2] + "***" if len(local) > 2 else local[:1] + "***") + "@" + domain
+
+    def cancel_challenge(self, challenge_id):
+        with self.lock:
+            self.connection.execute("DELETE FROM auth_challenges WHERE id = ?", (str(challenge_id or ""),))
+            self.connection.commit()
+
+    def verify_challenge(self, challenge_id, code, purpose):
+        identifier = str(challenge_id or "")
+        supplied = str(code or "").strip()
+        if len(identifier) < 20 or not re.fullmatch(r"\d{6}", supplied):
+            raise ChatDatabaseError("invalid verification code")
+        with self.lock:
+            self._clear_expired_auth()
+            row = self.connection.execute("SELECT * FROM auth_challenges WHERE id = ? AND purpose = ?",
+                                          (identifier, purpose)).fetchone()
+            if row is None:
+                raise ChatDatabaseError("verification code expired; request a new code", 401)
+            if int(row["attempts"]) >= 5:
+                self.connection.execute("DELETE FROM auth_challenges WHERE id = ?", (identifier,))
+                self.connection.commit()
+                raise ChatDatabaseError("too many code attempts; request a new code", 429)
+            if not hmac.compare_digest(row["code_hash"], self._challenge_hash(identifier, supplied)):
+                self.connection.execute("UPDATE auth_challenges SET attempts = attempts + 1 WHERE id = ?", (identifier,))
+                self.connection.commit()
+                raise ChatDatabaseError("invalid verification code", 401)
+            try:
+                self.connection.execute("BEGIN IMMEDIATE")
+                if purpose == "register":
+                    now_iso = _now_iso()
+                    self.connection.execute(
+                        "INSERT INTO profiles(name, display_name, owner_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                        (row["username"], row["display_name"] or row["username"], "password-auth-disabled-legacy", now_iso, now_iso),
+                    )
+                    self.connection.execute(
+                        "INSERT INTO auth_accounts(username, email, password_salt, password_hash, password_iterations, verified_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (row["username"], row["email"], row["password_salt"], row["password_hash"],
+                         row["password_iterations"], now_iso),
+                    )
+                token = self._new_session(row["username"])
+                self.connection.execute("DELETE FROM auth_challenges WHERE id = ?", (identifier,))
+                self.connection.commit()
+            except sqlite3.IntegrityError:
+                self.connection.rollback()
+                raise ChatDatabaseError("account is already registered", 409)
+            except Exception:
+                self.connection.rollback()
+                raise
+            profile = self.connection.execute("SELECT * FROM profiles WHERE name = ?", (row["username"],)).fetchone()
+            return {"session_token": token, "profile": self._profile(profile)}
+
+    def logout(self, session_token):
+        token_hash = _token_hash(session_token)
+        with self.lock:
+            self.connection.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+            self.connection.commit()
+        return {"ok": True}
 
     def _add_message_events(self, message_id, sender, recipient, kind="message"):
         now = _now_iso()
@@ -144,22 +386,7 @@ class ChatDatabase:
         )
 
     def claim(self, username, display_name, owner_token):
-        name = _username(username)
-        owner_hash = _token_hash(owner_token)
-        title = str(display_name or "").strip()[:80] or name
-        now = _now_iso()
-        with self.lock:
-            row = self.connection.execute("SELECT * FROM profiles WHERE name = ?", (name,)).fetchone()
-            if row is None:
-                self.connection.execute(
-                    "INSERT INTO profiles(name, display_name, owner_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                    (name, title, owner_hash, now, now),
-                )
-                self.connection.commit()
-                row = self.connection.execute("SELECT * FROM profiles WHERE name = ?", (name,)).fetchone()
-            elif row["owner_hash"] != owner_hash:
-                raise ChatDatabaseError("username is already taken", 409)
-            return self._profile(row)
+        raise ChatDatabaseError("old sign-in method is disabled; update the app", 410)
 
     def update_profile(self, username, new_username, display_name, bio, avatar_base64, owner_token):
         old_name = _username(username)
@@ -369,6 +596,10 @@ class ChatDatabase:
             self.connection.execute("BEGIN IMMEDIATE")
             self.connection.execute("DELETE FROM events")
             self.connection.execute("DELETE FROM messages")
+            self.connection.execute("DELETE FROM auth_challenges")
+            self.connection.execute("DELETE FROM auth_sessions")
+            self.connection.execute("DELETE FROM auth_accounts")
+            self.connection.execute("DELETE FROM auth_login_attempts")
             self.connection.execute("DELETE FROM profiles")
             self.connection.execute("DELETE FROM sqlite_sequence")
             self.connection.commit()
@@ -377,5 +608,5 @@ class ChatDatabase:
         with self.lock:
             return {
                 table: int(self.connection.execute("SELECT COUNT(*) FROM " + table).fetchone()[0])
-                for table in ("profiles", "messages", "events")
+                for table in ("profiles", "messages", "events", "auth_accounts", "auth_sessions")
             }

@@ -9,10 +9,14 @@ class ChatDatabaseTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.database = ChatDatabase(os.path.join(self.directory.name, "chat.sqlite3"))
-        self.alice_token = "a" * 64
-        self.bob_token = "b" * 64
-        self.database.claim("alice", "Alice", self.alice_token)
-        self.database.claim("bob", "Bob", self.bob_token)
+        self.alice_token = self.register("alice")
+        self.bob_token = self.register("bob")
+
+    def register(self, name):
+        challenge, _address, code = self.database.start_registration(
+            name, name + "@example.com", "securepass1", "securepass1", name.title()
+        )
+        return self.database.verify_challenge(challenge["challenge_id"], code, "register")["session_token"]
 
     def tearDown(self):
         self.database.close()
@@ -44,14 +48,24 @@ class ChatDatabaseTests(unittest.TestCase):
         replay = self.database.sync("bob", self.bob_token, first["cursor"])
         self.assertEqual(replay["events"][0]["message"]["id"], message["id"])
 
-    def test_owner_token_protects_profile(self):
+    def test_session_protects_profile(self):
         with self.assertRaises(ChatDatabaseError):
-            self.database.claim("alice", "Not Alice", self.bob_token)
+            self.database.update_profile("alice", "alice", "Not Alice", "", None, self.bob_token)
+
+    def test_password_and_email_code_are_required(self):
+        challenge, _address, code = self.database.start_login("alice", "securepass1")
+        with self.assertRaises(ChatDatabaseError):
+            self.database.verify_challenge(challenge["challenge_id"], "000000", "login")
+        session = self.database.verify_challenge(challenge["challenge_id"], code, "login")["session_token"]
+        self.assertEqual(self.database.sync("alice", session, 0)["cursor"], 0)
+        with self.assertRaises(ChatDatabaseError):
+            self.database.start_login("alice", "wrong-password")
 
     def test_reset_removes_all_server_data(self):
         self.database.send("alice", "bob", "request-3", "Удалить", self.alice_token)
         self.database.reset()
-        self.assertEqual(self.database.counts(), {"profiles": 0, "messages": 0, "events": 0})
+        self.assertEqual(self.database.counts(), {"profiles": 0, "messages": 0, "events": 0,
+                                                  "auth_accounts": 0, "auth_sessions": 0})
 
 
 if __name__ == "__main__":

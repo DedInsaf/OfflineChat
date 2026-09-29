@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from .api import OnlineAPI
 from .files import stage, discard
 from .models import valid_username
-from .storage import load_cursor, load_owner_token, save_cursor
+from .storage import (clear_session_token, load_cursor, load_session_token,
+                      load_username, save_cursor, save_session_token, save_username)
 
 
 def _error_text(error):
@@ -15,8 +16,14 @@ def _error_text(error):
     lowered = value.lower()
     if "username is already taken" in lowered:
         return "Этот @username уже занят"
-    if "invalid owner token" in lowered:
-        return "Профиль принадлежит другому устройству"
+    if "session expired" in lowered or "session" in lowered and "invalid" in lowered:
+        return "Сессия закончилась. Войдите снова"
+    if "invalid username/email or password" in lowered:
+        return "Неверный юз, почта или пароль"
+    if "passwords do not match" in lowered:
+        return "Пароли не совпадают"
+    if "email delivery is not configured" in lowered:
+        return "На сервере ещё не подключена отправка писем"
     if "connection refused" in lowered:
         return "Личный сервер не запущен"
     return value or "Сервер временно недоступен"
@@ -30,10 +37,9 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
                 return
             status_queue.put({"event": "online_network_error", "message": "Адрес общего сервера ещё не настроен"})
     api = OnlineAPI(server_url, api_key)
-    token = load_owner_token()
-    username = valid_username(display_name) or ""
+    token = load_session_token()
+    username = (load_username() or "") if token else ""
     cursor = load_cursor(username) if username else 0
-    claimed = False
     last_poll = 0.0
     last_error = 0.0
     connected = False
@@ -79,25 +85,21 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
         status_queue.put({"event": event, **payload})
 
     def network_error(error):
-        nonlocal last_error, connected
+        nonlocal last_error, connected, username, token, cursor
         connected = False
+        if getattr(error, "status", None) == 401 and username:
+            username, token, cursor = "", "", 0
+            clear_session_token()
+            save_username("")
+            emit("online_auth_expired", message="Сессия закончилась. Войдите снова")
+            return
         now = time.monotonic()
         if now - last_error >= 8:
             last_error = now
             emit("online_network_error", message=_error_text(error))
 
-    def ensure_claimed():
-        nonlocal claimed
-        if not username or claimed:
-            return claimed
-        profile = api.claim(username, username, token)
-        claimed = True
-        profile_signatures[username] = tuple(profile.get(key) for key in ("display_name", "bio", "avatar_base64"))
-        emit("online_profile", profile=profile, mine=True)
-        return True
-
     def handle(command):
-        nonlocal username, cursor, claimed
+        nonlocal username, cursor, token
         kind = command.get("type")
         if kind == "shutdown":
             return False
@@ -106,23 +108,51 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
             cursor = 0 if command.get("reset_cursor") else (load_cursor(username) if username else 0)
             if username and command.get("reset_cursor"):
                 save_cursor(username, 0)
-            claimed = False
-            if username:
-                ensure_claimed()
             return True
-        if kind == "claim_username":
-            wanted = valid_username(command.get("name"))
-            if not wanted:
-                emit("online_username_error", message="От 3 до 20 символов: латиница, цифры и _. Первый символ — буква.")
-                return True
+        if kind in ("auth_register_start", "auth_login_start"):
             try:
-                profile = api.claim(wanted, command.get("display_name") or wanted, token)
-                username, cursor, claimed = wanted, 0, True
-                profile_signatures[username] = tuple(profile.get(key) for key in ("display_name", "bio", "avatar_base64"))
-                save_cursor(username, 0)
-                emit("online_username_ok", name=username, profile=profile, message="Ваш юз @" + username)
+                if kind == "auth_register_start":
+                    wanted = valid_username(command.get("username"))
+                    if not wanted:
+                        raise ValueError("От 3 до 20 символов: латиница, цифры и _. Первый символ — буква.")
+                    result = api.start_registration(wanted, command.get("email"), command.get("password"),
+                                                    command.get("password_confirmation"), command.get("display_name"))
+                    purpose = "register"
+                else:
+                    result = api.start_login(command.get("identifier"), command.get("password"))
+                    purpose = "login"
+                emit("online_auth_code_sent", purpose=purpose, challenge_id=result["challenge_id"],
+                     email_hint=result.get("email_hint", ""))
             except Exception as exc:
-                emit("online_username_error", message=_error_text(exc))
+                emit("online_auth_error", message=_error_text(exc))
+            return True
+        if kind == "auth_verify":
+            try:
+                if command.get("purpose") == "register":
+                    result = api.verify_registration(command.get("challenge_id"), command.get("code"))
+                else:
+                    result = api.verify_login(command.get("challenge_id"), command.get("code"))
+                profile = result["profile"]
+                token = result["session_token"]
+                username, cursor = profile["name"], 0
+                save_session_token(token)
+                save_username(username)
+                save_cursor(username, 0)
+                profile_signatures[username] = tuple(profile.get(key) for key in ("display_name", "bio", "avatar_base64"))
+                emit("online_auth_ok", name=username, profile=profile)
+            except Exception as exc:
+                emit("online_auth_error", message=_error_text(exc))
+            return True
+        if kind == "auth_logout":
+            try:
+                if token:
+                    api.logout(token)
+            except Exception:
+                pass
+            token, username, cursor = "", "", 0
+            clear_session_token()
+            save_username("")
+            emit("online_auth_logged_out")
             return True
         if not username:
             return True
@@ -174,7 +204,7 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
                     command.get("avatar_base64"), token,
                 )
                 old_name = username
-                username, claimed = new_name, True
+                username = new_name
                 profile_signatures.pop(old_name, None)
                 profile_signatures[username] = tuple(profile.get(key) for key in ("display_name", "bio", "avatar_base64"))
                 if old_name != new_name:
@@ -205,7 +235,6 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
             if username and now - last_poll >= 1.0:
                 last_poll = now
                 try:
-                    ensure_claimed()
                     response = api.sync(username, token, cursor)
                     for profile in response.get("profiles") or []:
                         profile_name = profile.get("name")

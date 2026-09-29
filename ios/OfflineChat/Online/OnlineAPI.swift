@@ -19,6 +19,18 @@ enum OnlineAPIError: LocalizedError {
             if message.localizedCaseInsensitiveContains("invalid owner token") {
                 return "Профиль принадлежит другому устройству"
             }
+            if message.localizedCaseInsensitiveContains("invalid username/email or password") {
+                return "Неверный юз, почта или пароль"
+            }
+            if message.localizedCaseInsensitiveContains("passwords do not match") {
+                return "Пароли не совпадают"
+            }
+            if message.localizedCaseInsensitiveContains("session expired") {
+                return "Сессия закончилась. Войдите снова"
+            }
+            if message.localizedCaseInsensitiveContains("email delivery is not configured") {
+                return "На сервере ещё не подключена отправка писем"
+            }
             if message.localizedCaseInsensitiveContains("recipient not found") {
                 return "Пользователь не найден"
             }
@@ -31,6 +43,28 @@ enum OnlineAPIError: LocalizedError {
 
 private struct ServerErrorBody: Decodable {
     let error: String?
+}
+
+struct OnlineAuthChallenge: Decodable {
+    let challengeID: String
+    let emailHint: String
+    let expiresIn: Int
+
+    enum CodingKeys: String, CodingKey {
+        case challengeID = "challenge_id"
+        case emailHint = "email_hint"
+        case expiresIn = "expires_in"
+    }
+}
+
+struct OnlineAuthSession: Decodable {
+    let sessionToken: String
+    let profile: OnlineProfile
+
+    enum CodingKeys: String, CodingKey {
+        case sessionToken = "session_token"
+        case profile
+    }
 }
 
 final class OnlineAPI {
@@ -69,12 +103,30 @@ final class OnlineAPI {
         self.decoder = decoder
     }
 
-    func claim(username: String, displayName: String, ownerToken: String) async throws -> OnlineProfile {
-        try await call("profile/claim", body: [
-            "username": username,
-            "display_name": displayName,
-            "owner_token": ownerToken
-        ])
+    func startRegistration(username: String, email: String, password: String,
+                           confirmation: String, displayName: String) async throws -> OnlineAuthChallenge {
+        struct Body: Encodable {
+            let username: String; let email: String; let password: String
+            let password_confirmation: String; let display_name: String
+        }
+        return try await call("auth/register/start", body: Body(
+            username: username, email: email, password: password,
+            password_confirmation: confirmation, display_name: displayName
+        ))
+    }
+
+    func startLogin(identifier: String, password: String) async throws -> OnlineAuthChallenge {
+        try await call("auth/login/start", body: ["identifier": identifier, "password": password])
+    }
+
+    func verify(challengeID: String, code: String, registration: Bool) async throws -> OnlineAuthSession {
+        let endpoint = registration ? "auth/register/verify" : "auth/login/verify"
+        return try await call(endpoint, body: ["challenge_id": challengeID, "code": code])
+    }
+
+    func logout(sessionToken: String) async throws {
+        struct Reply: Decodable { let ok: Bool }
+        let _: Reply = try await call("auth/logout", body: ["session_token": sessionToken])
     }
 
     func checkConnection() async throws {
@@ -95,7 +147,7 @@ final class OnlineAPI {
         displayName: String,
         bio: String,
         avatarBase64: String?,
-        ownerToken: String
+        sessionToken: String
     ) async throws -> OnlineProfile {
         struct Body: Encodable {
             let username: String
@@ -103,7 +155,7 @@ final class OnlineAPI {
             let display_name: String
             let bio: String
             let avatar_base64: String?
-            let owner_token: String
+            let session_token: String
         }
         return try await call("profile/update", body: Body(
             username: currentUsername,
@@ -111,7 +163,7 @@ final class OnlineAPI {
             display_name: displayName,
             bio: bio,
             avatar_base64: avatarBase64,
-            owner_token: ownerToken
+            session_token: sessionToken
         ))
     }
 
@@ -119,7 +171,7 @@ final class OnlineAPI {
         try await call("profile/search", body: ["query": query])
     }
 
-    func send(_ message: OnlineMessage, ownerToken: String) async throws -> OnlineMessage {
+    func send(_ message: OnlineMessage, sessionToken: String) async throws -> OnlineMessage {
         struct FileBody: Encodable {
             let name: String
             let data_base64: String
@@ -129,7 +181,7 @@ final class OnlineAPI {
             let recipient: String
             let client_id: UUID
             let body: String
-            let owner_token: String
+            let session_token: String
             let attachment: FileBody?
         }
         var file: FileBody?
@@ -141,12 +193,12 @@ final class OnlineAPI {
             recipient: message.recipient,
             client_id: message.clientID,
             body: message.text,
-            owner_token: ownerToken,
+            session_token: sessionToken,
             attachment: file
         ))
     }
 
-    func download(_ message: OnlineMessage, username: String, ownerToken: String) async throws -> URL {
+    func download(_ message: OnlineMessage, username: String, sessionToken: String) async throws -> URL {
         guard let id = message.serverID, let attachment = message.attachment else {
             throw OnlineFiles.failure("Дождитесь отправки файла")
         }
@@ -155,55 +207,55 @@ final class OnlineAPI {
         }
         struct Body: Encodable {
             let username: String
-            let owner_token: String
+            let session_token: String
             let message_id: Int64
         }
         struct Download: Decodable { let data_base64: String }
-        let result: Download = try await call("files/download", body: Body(username: username, owner_token: ownerToken, message_id: id))
+        let result: Download = try await call("files/download", body: Body(username: username, session_token: sessionToken, message_id: id))
         return try await OnlineFiles.saveDownload(result.data_base64, attachment: attachment, id: message.clientID)
     }
 
-    func sync(username: String, ownerToken: String, after cursor: Int64) async throws -> OnlineSyncResponse {
+    func sync(username: String, sessionToken: String, after cursor: Int64) async throws -> OnlineSyncResponse {
         struct Body: Encodable {
             let username: String
-            let owner_token: String
+            let session_token: String
             let after_event: Int64
             let wait_ms: Int
         }
         return try await call("sync", body: Body(
             username: username,
-            owner_token: ownerToken,
+            session_token: sessionToken,
             after_event: cursor,
             wait_ms: 20_000
         ))
     }
 
-    func acknowledge(username: String, ownerToken: String, messageIDs: [Int64], status: OnlineMessageStatus) async throws {
+    func acknowledge(username: String, sessionToken: String, messageIDs: [Int64], status: OnlineMessageStatus) async throws {
         guard !messageIDs.isEmpty else { return }
         struct Body: Encodable {
             let username: String
-            let owner_token: String
+            let session_token: String
             let message_ids: [Int64]
             let status: String
         }
         let _: [Int64] = try await call("messages/ack", body: Body(
             username: username,
-            owner_token: ownerToken,
+            session_token: sessionToken,
             message_ids: messageIDs,
             status: status.rawValue
         ))
     }
 
-    func setTyping(username: String, recipient: String, ownerToken: String) async throws {
+    func setTyping(username: String, recipient: String, sessionToken: String) async throws {
         struct Body: Encodable {
             let username: String
             let recipient: String
-            let owner_token: String
+            let session_token: String
         }
         let _: Bool = try await call("typing", body: Body(
             username: username,
             recipient: recipient,
-            owner_token: ownerToken
+            session_token: sessionToken
         ))
     }
 

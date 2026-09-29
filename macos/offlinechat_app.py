@@ -1506,6 +1506,9 @@ class App:
         self.pages = {}
         self.page_factories = {}
         self.online_username = load_online_user()
+        self.online_auth_mode = "login"
+        self.online_auth_challenge = ""
+        self.online_auth_purpose = ""
         self.online_chats = load_online_chats()
         for history in self.online_chats.values():
             for item in history:
@@ -1691,15 +1694,37 @@ class App:
         self.online_setup = tk.Frame(page, bg=THEME["chat_bg"])
         wrap = tk.Frame(self.online_setup, bg=THEME["surface"], highlightbackground=THEME["line"], highlightthickness=1)
         wrap.pack(fill="both", expand=True, padx=28, pady=28)
-        tk.Label(wrap, text="Вход или регистрация", bg=THEME["surface"], fg=THEME["text"], font=display_font(26, "bold"), anchor="w").pack(fill="x", padx=22, pady=(22, 6))
-        tk.Label(wrap, text="Введите уникальный @username. Новый адрес будет зарегистрирован, а созданный ранее на этом Mac — открыт снова.", bg=THEME["surface"], fg=THEME["muted"], font=ui_font(13), wraplength=520, justify="left", anchor="w").pack(fill="x", padx=22)
-        self.username_entry = tk.Entry(wrap, bg=THEME["surface_alt"], fg=THEME["text"], insertbackground=THEME["text"], disabledforeground=THEME["subtle"], selectbackground=THEME["primary"], selectforeground=THEME["primary_fg"], relief="flat", font=ui_font(16), highlightbackground=THEME["line"], highlightthickness=1)
-        self.username_entry.pack(fill="x", padx=22, pady=16, ipady=10)
-        if self.online_username:
-            self.username_entry.insert(0, self.online_username)
-        self.username_hint = tk.Label(wrap, text="Латиница, цифры и _. От 3 символов. Например: anna_k", bg=THEME["surface"], fg=THEME["subtle"], font=ui_font(12), anchor="w")
-        self.username_hint.pack(fill="x", padx=22)
-        PillButton(wrap, "Войти / зарегистрироваться", command=self.claim_username, width=230, height=40).pack(anchor="w", padx=22, pady=(16, 22))
+        self.auth_title = tk.Label(wrap, text="Вход", bg=THEME["surface"], fg=THEME["text"], font=display_font(26, "bold"), anchor="w")
+        self.auth_title.pack(fill="x", padx=22, pady=(22, 6))
+        self.auth_description = tk.Label(wrap, text="Введите юз или почту и пароль. Затем подтвердите вход кодом из письма.", bg=THEME["surface"], fg=THEME["muted"], font=ui_font(13), wraplength=560, justify="left", anchor="w")
+        self.auth_description.pack(fill="x", padx=22)
+
+        def auth_field(placeholder, secret=False):
+            host = tk.Frame(wrap, bg=THEME["surface"])
+            tk.Label(host, text=placeholder, bg=THEME["surface"], fg=THEME["muted"], font=ui_font(11), anchor="w").pack(fill="x")
+            entry = tk.Entry(host, bg=THEME["surface_alt"], fg=THEME["text"], insertbackground=THEME["text"],
+                             selectbackground=THEME["primary"], selectforeground=THEME["primary_fg"], relief="flat",
+                             font=ui_font(14), highlightbackground=THEME["line"], highlightthickness=1,
+                             show="•" if secret else "")
+            entry.pack(fill="x", pady=(4, 0), ipady=8)
+            return host, entry
+
+        self.auth_identifier_row, self.username_entry = auth_field("Юз или почта")
+        self.auth_email_row, self.auth_email_entry = auth_field("Почта")
+        self.auth_password_row, self.auth_password_entry = auth_field("Пароль", True)
+        self.auth_confirm_row, self.auth_confirm_entry = auth_field("Подтвердите пароль", True)
+        for row in (self.auth_identifier_row, self.auth_email_row, self.auth_password_row, self.auth_confirm_row):
+            row.pack(fill="x", padx=22, pady=(12, 0))
+        self.username_hint = tk.Label(wrap, text="Пароль не короче 10 символов, с буквами и цифрами.", bg=THEME["surface"], fg=THEME["subtle"], font=ui_font(12), anchor="w")
+        self.username_hint.pack(fill="x", padx=22, pady=(12, 0))
+        actions = tk.Frame(wrap, bg=THEME["surface"])
+        actions.pack(anchor="w", padx=22, pady=(14, 22))
+        self.auth_submit_button = PillButton(actions, "Получить код", command=self.submit_online_auth, width=170, height=40)
+        self.auth_submit_button.pack(side="left")
+        self.auth_switch_button = PillButton(actions, "Создать аккаунт", command=self.toggle_online_auth_mode,
+                                             variant="ghost", width=180, height=40)
+        self.auth_switch_button.pack(side="left", padx=(8, 0))
+        self.apply_online_auth_mode()
 
         self.online_main = tk.Frame(page, bg=THEME["chat_bg"])
         left = tk.Frame(self.online_main, bg=THEME["surface"], width=280, highlightbackground=THEME["line"], highlightthickness=1)
@@ -1754,7 +1779,7 @@ class App:
         self.online_typing_peers.clear()
         save_online_user("")
         save_online_chats({})
-        self.online_command_queue.put({"type": "set_username", "name": "", "reset_cursor": True})
+        self.online_command_queue.put({"type": "auth_logout"})
         self._online_list_sig = None
         self._list_dirty = True
         self.show("online")
@@ -2267,10 +2292,63 @@ class App:
         self.online_command_queue.put({"type": "find_user", "name": query})
         self.set_status("Ищем", THEME["warning"], f"@{query}")
 
-    def claim_username(self):
-        raw = self.username_entry.get() if hasattr(self, "username_entry") else ""
-        self.online_command_queue.put({"type": "claim_username", "name": raw, "display_name": raw})
-        self.set_status("Проверяем юз", THEME["warning"], "Смотрим, не занят ли")
+    def apply_online_auth_mode(self):
+        if not hasattr(self, "auth_title"):
+            return
+        registering = self.online_auth_mode == "register"
+        self.auth_title.config(text="Регистрация" if registering else "Вход")
+        self.auth_description.config(text=(
+            "Создайте аккаунт. Мы отправим на почту шестизначный код подтверждения."
+            if registering else
+            "Введите юз или почту и пароль. Затем подтвердите вход кодом из письма."
+        ))
+        if registering:
+            self.auth_email_row.pack(fill="x", padx=22, pady=(12, 0), after=self.auth_identifier_row)
+            self.auth_confirm_row.pack(fill="x", padx=22, pady=(12, 0), after=self.auth_password_row)
+        else:
+            self.auth_email_row.pack_forget()
+            self.auth_confirm_row.pack_forget()
+        self.auth_switch_button.label = "У меня есть аккаунт" if registering else "Создать аккаунт"
+        self.auth_switch_button.redraw()
+
+    def toggle_online_auth_mode(self):
+        self.online_auth_mode = "login" if self.online_auth_mode == "register" else "register"
+        self.online_auth_challenge = ""
+        self.apply_online_auth_mode()
+        self.username_hint.config(text="Пароль не короче 10 символов, с буквами и цифрами.", fg=THEME["subtle"])
+
+    def submit_online_auth(self):
+        identifier = self.username_entry.get().strip()
+        password = self.auth_password_entry.get()
+        if self.online_auth_mode == "register":
+            self.online_command_queue.put({
+                "type": "auth_register_start", "username": identifier, "display_name": identifier,
+                "email": self.auth_email_entry.get().strip(), "password": password,
+                "password_confirmation": self.auth_confirm_entry.get(),
+            })
+        else:
+            self.online_command_queue.put({"type": "auth_login_start", "identifier": identifier, "password": password})
+        self.username_hint.config(text="Отправляем код…", fg=THEME["warning"])
+
+    def verify_online_auth(self):
+        code = self.auth_code_entry.get().strip() if hasattr(self, "auth_code_entry") else ""
+        self.online_command_queue.put({"type": "auth_verify", "challenge_id": self.online_auth_challenge,
+                                       "purpose": self.online_auth_purpose, "code": code})
+        self.username_hint.config(text="Проверяем код…", fg=THEME["warning"])
+
+    def show_online_code_dialog(self, email_hint):
+        _overlay, panel = self.open_overlay(430, 300)
+        tk.Label(panel, text="Код из письма", bg=THEME["surface"], fg=THEME["text"],
+                 font=display_font(22, "bold")).pack(anchor="w", padx=28, pady=(28, 8))
+        tk.Label(panel, text="Мы отправили 6 цифр на " + email_hint, bg=THEME["surface"], fg=THEME["muted"],
+                 font=ui_font(12), wraplength=360, justify="left").pack(anchor="w", padx=28)
+        self.auth_code_entry = tk.Entry(panel, bg=THEME["surface_alt"], fg=THEME["text"],
+                                        insertbackground=THEME["text"], relief="flat", font=ui_font(24),
+                                        justify="center", highlightbackground=THEME["line"], highlightthickness=1)
+        self.auth_code_entry.pack(fill="x", padx=28, pady=20, ipady=8)
+        self.auth_code_entry.bind("<Return>", lambda _event: self.verify_online_auth())
+        PillButton(panel, "Подтвердить", command=self.verify_online_auth, width=160, height=40).pack(anchor="w", padx=28)
+        self.auth_code_entry.focus_set()
 
     def new_online_chat(self):
         self.find_user()
@@ -3041,7 +3119,13 @@ class App:
             if self.online_peer_status and self.active_online_chat:
                 text = "печатает…" if self.active_online_chat in self.online_typing_peers else "@" + self.active_online_chat
                 self.online_peer_status.config(text=text, fg=THEME["accent"] if self.active_online_chat in self.online_typing_peers else THEME["muted"])
-        elif kind == "online_username_ok":
+        elif kind == "online_auth_code_sent":
+            self.online_auth_challenge = event.get("challenge_id") or ""
+            self.online_auth_purpose = event.get("purpose") or "login"
+            self.show_online_code_dialog(event.get("email_hint") or "почту")
+            self.username_hint.config(text="Код отправлен. Он действует 10 минут.", fg=THEME["success"])
+            self.set_status("Проверьте почту", THEME["success"], event.get("email_hint") or "")
+        elif kind == "online_auth_ok":
             name = event.get("name") or ""
             self.online_username = name
             save_online_user(name)
@@ -3051,13 +3135,22 @@ class App:
                 self.online_profiles[name] = profile
                 save_online_profiles(self.online_profiles)
             if hasattr(self, "username_hint"):
-                self.username_hint.config(text=f"Юз закреплён: @{name}", fg=THEME["success"])
+                self.username_hint.config(text=f"Выполнен вход: @{name}", fg=THEME["success"])
+            self.close_overlay()
             self.refresh_online_mode()
-            self.set_status("Юз готов", THEME["success"], f"@{name}")
-        elif kind == "online_username_error":
+            self.set_status("Вход выполнен", THEME["success"], f"@{name}")
+        elif kind == "online_auth_error":
             if hasattr(self, "username_hint"):
-                self.username_hint.config(text=message or "Юз занять не вышло", fg=THEME["danger"])
-            self.set_status("Юз занят", THEME["danger"], message)
+                self.username_hint.config(text=message or "Не удалось войти", fg=THEME["danger"])
+            self.set_status("Ошибка входа", THEME["danger"], message)
+        elif kind == "online_auth_expired":
+            self.online_username = ""
+            self.active_online_chat = None
+            save_online_user("")
+            self.close_overlay()
+            self.refresh_online_mode()
+            self.username_hint.config(text=message, fg=THEME["danger"])
+            self.set_status("Нужно войти снова", THEME["danger"], message)
         elif kind == "online_network_error":
             self.set_status("Онлайн недоступен", THEME["warning"], message or "Проверьте интернет")
         elif kind == "online_find":

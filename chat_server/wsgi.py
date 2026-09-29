@@ -28,8 +28,8 @@ class WSGIHandler(ChatHandler):
         self.response = status, payload
 
 
-def create_application(database_path):
-    state = ServerState(ChatDatabase(str(database_path)))
+def create_application(database_path, code_sender=None):
+    state = ServerState(ChatDatabase(str(database_path)), code_sender=code_sender)
 
     def application(environ, start_response):
         try:

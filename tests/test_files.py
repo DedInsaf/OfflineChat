@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from chat_server.database import MAX_FILE_BYTES
+from chat_server.emailer import MemoryCodeSender
 from chat_server.wsgi import create_application
 from online_chat.files import stage, discard
 
@@ -23,9 +24,11 @@ class FileTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.path = Path(self.directory.name) / "chat.sqlite3"
-        self.app = create_application(self.path)
+        self.sender = MemoryCodeSender()
+        self.app = create_application(self.path, self.sender)
+        self.tokens = {}
         for name in ("alice", "bob", "eve"):
-            self.request("profile/claim", {"username": name, "owner_token": name * 32})
+            self.tokens[name] = self.register(name)
 
     def tearDown(self):
         self.app.database.close()
@@ -39,13 +42,26 @@ class FileTests(unittest.TestCase):
                           lambda status, headers: statuses.append(int(status.split()[0])))
         return statuses[0], json.loads(b"".join(result))
 
+    def register(self, name):
+        status, challenge = self.request("auth/register/start", {
+            "username": name, "email": name + "@example.com", "password": "securepass1",
+            "password_confirmation": "securepass1", "display_name": name.title(),
+        })
+        self.assertEqual(status, 200)
+        code = self.sender.messages[-1]["code"]
+        status, session = self.request("auth/register/verify", {
+            "challenge_id": challenge["challenge_id"], "code": code,
+        })
+        self.assertEqual(status, 200)
+        return session["session_token"]
+
     def send(self, content=b"\x00\xffHello", name="Документ.bin", client_id="file-1"):
         return self.request("messages/send", {"sender": "alice", "recipient": "bob", "body": "",
-            "client_id": client_id, "owner_token": "alice" * 32,
+            "client_id": client_id, "session_token": self.tokens["alice"],
             "attachment": {"name": name, "data_base64": base64.b64encode(content).decode()}})
 
     def download(self, who, mid):
-        return self.request("files/download", {"username": who, "owner_token": who * 32, "message_id": mid})
+        return self.request("files/download", {"username": who, "session_token": self.tokens[who], "message_id": mid})
 
     def test_roundtrip_acl_idempotency_and_restart(self):
         content = bytes(range(256)) * 1024
@@ -55,22 +71,22 @@ class FileTests(unittest.TestCase):
         self.assertEqual(self.send(content)[1]["id"], sent["id"])
         self.assertEqual(self.app.database.counts()["messages"], 1)
         self.assertEqual(self.download("eve", sent["id"])[0], 404)
-        self.assertEqual(self.request("files/download", {"username": "bob", "owner_token": "x" * 64,
-            "message_id": sent["id"]})[0], 403)
+        self.assertEqual(self.request("files/download", {"username": "bob", "session_token": "x" * 64,
+            "message_id": sent["id"]})[0], 401)
         self.app.database.close()
-        self.app = create_application(self.path)
+        self.app = create_application(self.path, self.sender)
         for user in ("alice", "bob"):
             status, downloaded = self.download(user, sent["id"])
             self.assertEqual(status, 200)
             self.assertEqual(base64.b64decode(downloaded["data_base64"]), content)
-        _, synced = self.request("sync", {"username": "bob", "owner_token": "bob" * 32})
+        _, synced = self.request("sync", {"username": "bob", "session_token": self.tokens["bob"]})
         self.assertNotIn("data_base64", json.dumps(synced))
         self.assertEqual(synced["events"][0]["message"]["attachment"], sent["attachment"])
         for receipt in ("delivered", "read"):
-            self.assertEqual(self.request("messages/ack", {"username": "bob", "owner_token": "bob" * 32,
+            self.assertEqual(self.request("messages/ack", {"username": "bob", "session_token": self.tokens["bob"],
                 "message_ids": [sent["id"]], "status": receipt})[0], 200)
-        self.request("profile/update", {"username": "bob", "new_username": "bobby", "owner_token": "bob" * 32})
-        self.assertEqual(self.request("files/download", {"username": "bobby", "owner_token": "bob" * 32,
+        self.request("profile/update", {"username": "bob", "new_username": "bobby", "session_token": self.tokens["bob"]})
+        self.assertEqual(self.request("files/download", {"username": "bobby", "session_token": self.tokens["bob"],
             "message_id": sent["id"]})[0], 200)
 
     def test_limits_validation_and_transaction_rollback(self):
@@ -86,9 +102,9 @@ class FileTests(unittest.TestCase):
 
     def test_invalid_base64_and_text_compatibility(self):
         self.assertEqual(self.request("messages/send", {"sender": "alice", "recipient": "bob", "client_id": "bad",
-            "owner_token": "alice" * 32, "attachment": {"name": "x", "data_base64": "!!!!"}})[0], 400)
+            "session_token": self.tokens["alice"], "attachment": {"name": "x", "data_base64": "!!!!"}})[0], 400)
         status, sent = self.request("messages/send", {"sender": "alice", "recipient": "bob", "client_id": "text",
-            "owner_token": "alice" * 32, "body": "Привет"})
+            "session_token": self.tokens["alice"], "body": "Привет"})
         self.assertEqual(status, 200)
         self.assertIsNone(sent["attachment"])
         self.assertEqual(self.download("bob", sent["id"])[0], 404)
@@ -99,7 +115,7 @@ class FileTests(unittest.TestCase):
         con.execute("ALTER TABLE messages DROP COLUMN attachment")
         con.commit()
         con.close()
-        self.app = create_application(self.path)
+        self.app = create_application(self.path, self.sender)
         self.assertEqual(self.send()[0], 200)
 
     def test_upload_copy_survives_changed_original(self):

@@ -3,10 +3,9 @@ import Security
 
 enum OnlineCredentials {
     private static let service = "com.offlinechat.online-profile"
-    private static let account = "owner-token-v3"
-    private static let legacyDefaultsKey = "onlinechat.ownerToken.v3"
+    private static let account = "session-token-v4"
 
-    static func ownerToken() -> String {
+    static func sessionToken() -> String {
         let lookup: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -21,9 +20,12 @@ enum OnlineCredentials {
             return value
         }
 
-        let defaults = UserDefaults.standard
-        let value = defaults.string(forKey: legacyDefaultsKey).flatMap { $0.isEmpty ? nil : $0 }
-            ?? (UUID().uuidString + UUID().uuidString)
+        return ""
+    }
+
+    static func saveSessionToken(_ value: String) {
+        clearSessionToken()
+        guard !value.isEmpty else { return }
         let data = Data(value.utf8)
         let insert: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -33,7 +35,14 @@ enum OnlineCredentials {
             kSecValueData as String: data
         ]
         SecItemAdd(insert as CFDictionary, nil)
-        defaults.removeObject(forKey: legacyDefaultsKey)
-        return value
+    }
+
+    static func clearSessionToken() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
     }
 }

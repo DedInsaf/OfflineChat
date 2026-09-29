@@ -5,6 +5,7 @@ import unittest
 
 from chat_server.database import ChatDatabase
 from chat_server.server import ChatHTTPServer, ServerState
+from chat_server.emailer import MemoryCodeSender
 from online_chat.api import OnlineAPI
 
 
@@ -12,7 +13,8 @@ class ServerHTTPTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.database = ChatDatabase(os.path.join(self.directory.name, "chat.sqlite3"))
-        self.server = ChatHTTPServer(("127.0.0.1", 0), ServerState(self.database))
+        self.sender = MemoryCodeSender()
+        self.server = ChatHTTPServer(("127.0.0.1", 0), ServerState(self.database, self.sender))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
@@ -23,13 +25,15 @@ class ServerHTTPTests(unittest.TestCase):
         self.database.close()
         self.directory.cleanup()
 
+    def register(self, api, name):
+        challenge = api.start_registration(name, name + "@example.com", "securepass1", "securepass1", name.title())
+        return api.verify_registration(challenge["challenge_id"], self.sender.messages[-1]["code"])["session_token"]
+
     def test_two_clients_exchange_and_acknowledge_message(self):
         alice = OnlineAPI(self.url)
         bob = OnlineAPI(self.url)
-        alice_token = "a" * 64
-        bob_token = "b" * 64
-        alice.claim("alice", "Alice", alice_token)
-        bob.claim("bob", "Bob", bob_token)
+        alice_token = self.register(alice, "alice")
+        bob_token = self.register(bob, "bob")
 
         sent = alice.send("alice", "bob", "http-request-1", "Привет", alice_token)
         received = bob.sync("bob", bob_token, 0)
@@ -47,10 +51,10 @@ class ServerHTTPTests(unittest.TestCase):
         path.write_bytes("Привет из файла".encode())
         api = OnlineAPI(self.url)
         try:
-            api.claim("alice", "Alice", "a" * 64)
-            api.claim("bob", "Bob", "b" * 64)
-            message = api.send_file("alice", "bob", "file-http", path, "a" * 64)
-            self.assertEqual(api.download_file("bob", "b" * 64, message["id"], message["attachment"]), path.read_bytes())
+            alice_token = self.register(api, "alice")
+            bob_token = self.register(api, "bob")
+            message = api.send_file("alice", "bob", "file-http", path, alice_token)
+            self.assertEqual(api.download_file("bob", bob_token, message["id"], message["attachment"]), path.read_bytes())
         finally:
             api.close()
 

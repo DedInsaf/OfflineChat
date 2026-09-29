@@ -95,10 +95,23 @@ class OnlineAPI:
                         raise URLError(str(last_error))
         raise URLError(str(last_error or "request failed"))
 
-    def claim(self, username, display_name, token):
-        return self.request("profile/claim", {
-            "username": username, "display_name": display_name, "owner_token": token,
+    def start_registration(self, username, email, password, password_confirmation, display_name=""):
+        return self.request("auth/register/start", {
+            "username": username, "email": email, "password": password,
+            "password_confirmation": password_confirmation, "display_name": display_name,
         })
+
+    def verify_registration(self, challenge_id, code):
+        return self.request("auth/register/verify", {"challenge_id": challenge_id, "code": code})
+
+    def start_login(self, identifier, password):
+        return self.request("auth/login/start", {"identifier": identifier, "password": password})
+
+    def verify_login(self, challenge_id, code):
+        return self.request("auth/login/verify", {"challenge_id": challenge_id, "code": code})
+
+    def logout(self, token):
+        return self.request("auth/logout", {"session_token": token})
 
     def update_profile(self, username, new_username, display_name, bio, avatar_base64, token):
         return self.request("profile/update", {
@@ -107,7 +120,7 @@ class OnlineAPI:
             "display_name": display_name,
             "bio": bio,
             "avatar_base64": avatar_base64,
-            "owner_token": token,
+            "session_token": token,
         }, timeout=20)
 
     def search(self, query):
@@ -119,7 +132,7 @@ class OnlineAPI:
             "recipient": recipient,
             "client_id": client_id,
             "body": text,
-            "owner_token": token,
+            "session_token": token,
             "attachment": attachment,
         }, timeout=60 if attachment else 8)
 
@@ -134,7 +147,7 @@ class OnlineAPI:
 
     def download_file(self, username, token, message_id, attachment):
         result = self.request("files/download", {
-            "username": username, "owner_token": token, "message_id": message_id,
+            "username": username, "session_token": token, "message_id": message_id,
         }, timeout=60)
         data = base64.b64decode(result["data_base64"], validate=True)
         if len(data) != attachment["size"] or hashlib.sha256(data).hexdigest() != attachment["sha256"]:
@@ -144,7 +157,7 @@ class OnlineAPI:
     def sync(self, username, token, cursor, wait_ms=0):
         return self.request("sync", {
             "username": username,
-            "owner_token": token,
+            "session_token": token,
             "after_event": int(cursor or 0),
             "wait_ms": int(wait_ms or 0),
         }, timeout=max(8, int(wait_ms / 1000) + 5)) or {}
@@ -152,7 +165,7 @@ class OnlineAPI:
     def acknowledge(self, username, token, message_ids, status):
         return self.request("messages/ack", {
             "username": username,
-            "owner_token": token,
+            "session_token": token,
             "message_ids": [int(value) for value in message_ids],
             "status": status,
         })
@@ -161,5 +174,5 @@ class OnlineAPI:
         return self.request("typing", {
             "username": username,
             "recipient": recipient,
-            "owner_token": token,
+            "session_token": token,
         }, timeout=5)
