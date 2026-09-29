@@ -179,6 +179,26 @@ final class OnlineChatStore: ObservableObject {
         }
     }
 
+    func logout() {
+        syncTask?.cancel()
+        syncTask = nil
+        syncInFlight = false
+        username = ""
+        myProfile = nil
+        messages = [:]
+        profiles = [:]
+        peers = []
+        typingPeers = []
+        searchResults = []
+        cursor = 0
+        openPeer = nil
+        claimError = ""
+        searchError = ""
+        connectionText = "Не подключено"
+        defaults.removeObject(forKey: usernameKey)
+        persist()
+    }
+
     func claim(_ rawUsername: String, displayName: String) async {
         guard let wanted = UsernameRules.validate(rawUsername) else {
             claimError = "От 3 до 20 символов: латинские буквы, цифры и _. Первый символ — буква."

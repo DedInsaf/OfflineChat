@@ -96,10 +96,10 @@ struct OnlineMessengerView: View {
             Image(systemName: "paperplane.fill")
                 .font(.system(size: 46))
                 .foregroundColor(.ocPrimary)
-            Text("Ваш профиль")
+            Text("Вход или регистрация")
                 .font(.system(size: 34, weight: .bold))
                 .foregroundColor(.ocText)
-            Text("Создайте уникальный @username. Отображаемое имя и фотографию можно изменить в профиле.")
+            Text("Введите @username. Новый адрес будет зарегистрирован, а созданный ранее на этом iPhone — открыт снова.")
                 .font(.system(size: 15))
                 .foregroundColor(.ocMuted)
             TextField("Имя", text: $nameDraft)
@@ -118,7 +118,7 @@ struct OnlineMessengerView: View {
             } label: {
                 HStack {
                     if store.isWorking { ProgressView().tint(.ocPrimaryFg) }
-                    Text("Продолжить").fontWeight(.bold)
+                    Text("Войти / зарегистрироваться").fontWeight(.bold)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)
@@ -1068,7 +1068,9 @@ private struct OnlineProfileView: View {
 
 struct OnlineAccountView: View {
     @ObservedObject var store: OnlineChatStore
+    let onOpenLogin: () -> Void
     @State private var editing = false
+    @State private var confirmLogout = false
 
     var body: some View {
         NavigationStack {
@@ -1089,6 +1091,17 @@ struct OnlineAccountView: View {
                         Text(store.myProfile?.bio.isEmpty == false ? store.myProfile!.bio : "Пока ничего не добавлено")
                         Button("Редактировать профиль") { editing = true }
                     }
+                    Section("Аккаунт") {
+                        Button("Сменить аккаунт") {
+                            store.logout()
+                            onOpenLogin()
+                        }
+                        Button("Выйти", role: .destructive) { confirmLogout = true }
+                    }
+                } else {
+                    Section("Аккаунт") {
+                        Button("Войти или зарегистрироваться") { onOpenLogin() }
+                    }
                 }
                 Section("Подключение") {
                     LabeledContent("Статус", value: store.connectionText)
@@ -1097,6 +1110,15 @@ struct OnlineAccountView: View {
             }
             .navigationTitle("Профиль")
             .sheet(isPresented: $editing) { OnlineProfileEditor(store: store) }
+            .confirmationDialog("Выйти из аккаунта?", isPresented: $confirmLogout, titleVisibility: .visible) {
+                Button("Выйти", role: .destructive) {
+                    store.logout()
+                    onOpenLogin()
+                }
+                Button("Отмена", role: .cancel) {}
+            } message: {
+                Text("Переписка останется на сервере. Для повторного входа понадобится тот же @username на этом устройстве.")
+            }
         }
     }
 }

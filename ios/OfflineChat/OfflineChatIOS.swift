@@ -825,6 +825,7 @@ final class OfflineChatBluetooth: NSObject, ObservableObject {
             onMain {
                 self.pendingConnection = IncomingRequest(name: peer)
             }
+            Notifier.post(title: "Запрос на оффлайн-чат", body: "\(peer) хочет подключиться")
             setStatus("\(peer) хочет подключиться", .warning)
             log("\(peer) хочет подключиться.")
             return
@@ -1961,7 +1962,7 @@ private struct ChatView: View {
 
 // MARK: - Incoming overlay
 
-private struct IncomingOverlay: View {
+struct IncomingOverlay: View {
     let name: String
     let onAllow: () -> Void
     let onDeny: () -> Void
@@ -2156,7 +2157,7 @@ private struct MedicalCardView: View {
 }
 
 struct OfflineChatView: View {
-    @StateObject private var bluetooth = OfflineChatBluetooth()
+    @ObservedObject var bluetooth: OfflineChatBluetooth
     @State private var named = false
 
     var body: some View {
@@ -2168,13 +2169,6 @@ struct OfflineChatView: View {
                 ChatView(bluetooth: bluetooth)
             } else {
                 DiscoverView(bluetooth: bluetooth)
-            }
-            if let request = bluetooth.pendingConnection {
-                IncomingOverlay(
-                    name: request.name,
-                    onAllow: { bluetooth.approveIncoming() },
-                    onDeny: { bluetooth.denyIncoming() }
-                )
             }
         }
         .onAppear {

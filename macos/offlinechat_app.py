@@ -1668,6 +1668,13 @@ class App:
         tk.Label(card, text="@" + self.online_username if self.online_username else "Профиль ещё не создан", bg=THEME["surface"], fg=THEME["muted"], font=ui_font(14)).pack(anchor="w")
         tk.Label(card, text=profile.get("bio") or "Добавьте несколько слов о себе", bg=THEME["surface"], fg=THEME["muted"], font=ui_font(13), wraplength=480, justify="left").pack(anchor="w", pady=20)
         PillButton(card, "Редактировать" if self.online_username else "Создать профиль", command=self.open_online_profile_editor if self.online_username else lambda: self.show("online"), width=180, height=40).pack(anchor="w")
+        if self.online_username:
+            account_actions = tk.Frame(card, bg=THEME["surface"])
+            account_actions.pack(anchor="w", pady=(12, 0))
+            PillButton(account_actions, "Сменить аккаунт", command=self.logout_online_account,
+                       variant="secondary", width=170, height=38).pack(side="left")
+            PillButton(account_actions, "Выйти", command=self.logout_online_account,
+                       variant="ghost", width=100, height=38).pack(side="left", padx=(8, 0))
         tk.Label(card, text="Сервер: " + self.online_server_url, bg=THEME["surface"], fg=THEME["subtle"], font=ui_font(11)).pack(anchor="w", pady=(28, 0))
         return page
 
@@ -1684,15 +1691,15 @@ class App:
         self.online_setup = tk.Frame(page, bg=THEME["chat_bg"])
         wrap = tk.Frame(self.online_setup, bg=THEME["surface"], highlightbackground=THEME["line"], highlightthickness=1)
         wrap.pack(fill="both", expand=True, padx=28, pady=28)
-        tk.Label(wrap, text="Ваш юз", bg=THEME["surface"], fg=THEME["text"], font=display_font(26, "bold"), anchor="w").pack(fill="x", padx=22, pady=(22, 6))
-        tk.Label(wrap, text="Как в Telegram: уникальный @username. По нему вас находят. Имя устройства для Bluetooth отдельно сверху.", bg=THEME["surface"], fg=THEME["muted"], font=ui_font(13), wraplength=520, justify="left", anchor="w").pack(fill="x", padx=22)
+        tk.Label(wrap, text="Вход или регистрация", bg=THEME["surface"], fg=THEME["text"], font=display_font(26, "bold"), anchor="w").pack(fill="x", padx=22, pady=(22, 6))
+        tk.Label(wrap, text="Введите уникальный @username. Новый адрес будет зарегистрирован, а созданный ранее на этом Mac — открыт снова.", bg=THEME["surface"], fg=THEME["muted"], font=ui_font(13), wraplength=520, justify="left", anchor="w").pack(fill="x", padx=22)
         self.username_entry = tk.Entry(wrap, bg=THEME["surface_alt"], fg=THEME["text"], insertbackground=THEME["text"], disabledforeground=THEME["subtle"], selectbackground=THEME["primary"], selectforeground=THEME["primary_fg"], relief="flat", font=ui_font(16), highlightbackground=THEME["line"], highlightthickness=1)
         self.username_entry.pack(fill="x", padx=22, pady=16, ipady=10)
         if self.online_username:
             self.username_entry.insert(0, self.online_username)
         self.username_hint = tk.Label(wrap, text="Латиница, цифры и _. От 3 символов. Например: anna_k", bg=THEME["surface"], fg=THEME["subtle"], font=ui_font(12), anchor="w")
         self.username_hint.pack(fill="x", padx=22)
-        PillButton(wrap, "Занять юз", command=self.claim_username, width=160, height=40).pack(anchor="w", padx=22, pady=(16, 22))
+        PillButton(wrap, "Войти / зарегистрироваться", command=self.claim_username, width=230, height=40).pack(anchor="w", padx=22, pady=(16, 22))
 
         self.online_main = tk.Frame(page, bg=THEME["chat_bg"])
         left = tk.Frame(self.online_main, bg=THEME["surface"], width=280, highlightbackground=THEME["line"], highlightthickness=1)
@@ -1733,6 +1740,26 @@ class App:
         else:
             self.online_main.pack_forget()
             self.online_setup.pack(fill="both", expand=True)
+
+    def logout_online_account(self):
+        if not self.online_username:
+            self.show("online")
+            return
+        old_name = self.online_username
+        self.close_online_attachment_menu()
+        self.online_username = ""
+        self.active_online_chat = None
+        self.online_transcript = None
+        self.online_chats = {}
+        self.online_typing_peers.clear()
+        save_online_user("")
+        save_online_chats({})
+        self.online_command_queue.put({"type": "set_username", "name": "", "reset_cursor": True})
+        self._online_list_sig = None
+        self._list_dirty = True
+        self.show("online")
+        self.refresh_online_mode()
+        self.set_status("Вы вышли", THEME["muted"], "Аккаунт @" + old_name + " сохранён на сервере")
 
     def online_empty_thread(self):
         if not hasattr(self, "online"):
@@ -2023,7 +2050,6 @@ class App:
             dock.place(x=max(8, ax - 10), y=max(8, ay - dock.height - 8))
         except Exception:
             dock.place(x=12, rely=1.0, y=-70, anchor="sw")
-        dock.lift()
         if hasattr(self, "attachment_button"):
             self.attachment_button.set_open(True)
 
