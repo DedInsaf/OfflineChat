@@ -14,6 +14,7 @@ import uuid
 import base64
 import hashlib
 import tempfile
+import sys
 from urllib.parse import quote
 
 try:
@@ -54,6 +55,28 @@ logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG, format="%(asctime)s 
 def log(msg):
     logging.debug(msg)
     print(msg, flush=True)
+
+
+def resource_path(relative_path):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative_path)
+
+
+def themed_icon_photo(name, size=20, color=None):
+    """Загружает готовую Lucide-иконку и окрашивает её под текущую тему."""
+    if Image is None or ImageTk is None:
+        return None
+    try:
+        path = resource_path(os.path.join("assets", "attachment_icons", name + ".png"))
+        with Image.open(path) as source:
+            icon = source.convert("RGBA").resize((size, size), Image.Resampling.LANCZOS)
+        red, green, blue = hex_to_rgb(color or THEME["text"])
+        tinted = Image.new("RGBA", icon.size, (red, green, blue, 0))
+        tinted.putalpha(icon.getchannel("A"))
+        return ImageTk.PhotoImage(tinted)
+    except Exception as exc:
+        log("icon %s: %s" % (name, exc))
+        return None
 
 
 if objc is not None:
@@ -579,6 +602,8 @@ class ClipButton(tk.Canvas):
         self.command = command
         self.open = False
         self._hover = False
+        self._normal_icon = themed_icon_photo("paperclip", 21, THEME["muted"])
+        self._active_icon = themed_icon_photo("paperclip", 21, THEME["text"])
         self.bind("<Button-1>", lambda _e: self.command and self.command())
         self.bind("<Enter>", lambda _e: self._set_hover(True))
         self.bind("<Leave>", lambda _e: self._set_hover(False))
@@ -594,12 +619,11 @@ class ClipButton(tk.Canvas):
 
     def redraw(self):
         self.delete("all")
-        color = THEME["text"] if self._hover or self.open else THEME["muted"]
-        self.create_line(
-            11, 22, 20, 13, 24, 13, 27, 16, 27, 20, 17, 30,
-            12, 30, 8, 26, 8, 21, 20, 9, 25, 9, 30, 14,
-            fill=color, width=2.0, capstyle=tk.ROUND, joinstyle=tk.ROUND, smooth=True,
-        )
+        icon = self._active_icon if self._hover or self.open else self._normal_icon
+        if icon is not None:
+            self.create_image(18, 18, image=icon)
+        else:
+            self.create_text(18, 18, text="📎", font=ui_font(17), fill=THEME["text"])
 
 
 class AttachDock(tk.Canvas):
@@ -610,10 +634,10 @@ class AttachDock(tk.Canvas):
         self.row_height = 43
         self.padding = 9
         self.items = [
-            ("media", "Фото или видео"),
-            ("file", "Файл"),
-            ("audio", "Звук"),
-            ("location", "Местоположение"),
+            ("media", "Фото или видео", "image"),
+            ("file", "Файл", "file"),
+            ("audio", "Звук", "audio-lines"),
+            ("location", "Местоположение", "map-pin"),
         ]
         self.height = self.padding * 2 + self.row_height * len(self.items)
         super().__init__(master, width=self.width, height=self.height, highlightthickness=0, bd=0,
@@ -622,6 +646,10 @@ class AttachDock(tk.Canvas):
         self.on_close = on_close
         self.closing = False
         self.hovered = None
+        self.icon_photos = {
+            kind: themed_icon_photo(icon_name, 20, THEME["text"])
+            for kind, _title, icon_name in self.items
+        }
         self.bind("<Motion>", self._motion)
         self.bind("<Leave>", self._leave)
         self.bind("<Button-1>", self._click)
@@ -654,36 +682,16 @@ class AttachDock(tk.Canvas):
     def _draw(self):
         self.delete("all")
         round_rect(self, 2, 2, self.width - 2, self.height - 2, 20, fill=THEME["surface"], outline="")
-        for index, (kind, title) in enumerate(self.items):
+        for index, (kind, title, _icon_name) in enumerate(self.items):
             top = self.padding + index * self.row_height
             center_y = top + self.row_height / 2
             if index == self.hovered:
                 round_rect(self, 7, top + 2, self.width - 7, top + self.row_height - 2, 12,
                            fill=THEME["surface_alt"], outline="")
-            self._icon(kind, 28, center_y)
+            icon = self.icon_photos.get(kind)
+            if icon is not None:
+                self.create_image(28, center_y, image=icon)
             self.create_text(52, center_y, text=title, anchor="w", fill=THEME["text"], font=ui_font(14))
-
-    def _icon(self, kind, x, y):
-        ink = THEME["text"]
-        width = 1.8
-        if kind == "media":
-            round_rect(self, x - 9, y - 8, x + 9, y + 8, 3, fill="", outline=ink, width=width)
-            self.create_oval(x + 2, y - 5, x + 6, y - 1, outline=ink, width=width)
-            self.create_line(x - 7, y + 5, x - 2, y, x + 2, y + 4, x + 5, y + 1, x + 8, y + 5,
-                             fill=ink, width=width, capstyle=tk.ROUND, joinstyle=tk.ROUND)
-        elif kind == "file":
-            self.create_line(x - 7, y - 9, x + 2, y - 9, x + 8, y - 3, x + 8, y + 9,
-                             x - 7, y + 9, x - 7, y - 9, fill=ink, width=width, joinstyle=tk.ROUND)
-            self.create_line(x + 2, y - 9, x + 2, y - 3, x + 8, y - 3, fill=ink, width=width)
-        elif kind == "audio":
-            self.create_line(x + 3, y - 9, x + 3, y + 5, fill=ink, width=width)
-            self.create_line(x + 3, y - 9, x + 9, y - 11, fill=ink, width=width)
-            self.create_oval(x - 4, y + 3, x + 3, y + 9, outline=ink, width=width)
-        else:
-            self.create_oval(x - 8, y - 10, x + 8, y + 6, outline=ink, width=width)
-            self.create_oval(x - 2.5, y - 5, x + 2.5, y, outline=ink, width=width)
-            self.create_line(x - 6, y + 3, x, y + 11, x + 6, y + 3, fill=ink, width=width,
-                             capstyle=tk.ROUND, joinstyle=tk.ROUND)
 
 
 class ScrollFrame(tk.Frame):

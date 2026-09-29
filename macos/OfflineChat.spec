@@ -6,7 +6,10 @@ a = Analysis(
     ['offlinechat_app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('assets/attachment_icons/*.png', 'assets/attachment_icons'),
+        ('assets/attachment_icons/LICENSE.txt', 'assets/attachment_icons'),
+    ],
     hiddenimports=[
         'PyObjCTools',
         'Foundation',
