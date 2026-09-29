@@ -6,8 +6,10 @@
     <string>https://dedinsaf.pythonanywhere.com</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>OfflineChat использует Bluetooth для обмена сообщениями с устройствами поблизости</string>
-    <key>NSBluetoothPeripheralUsageDescription</key>
-    <string>OfflineChat использует Bluetooth для передачи файлов и сообщений</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>OfflineChat использует Bluetooth для передачи файлов и сообщений</string>
+	<key>NSCameraUsageDescription</key>
+	<string>OfflineChat использует камеру, чтобы отправлять фотографии в онлайн-чате.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>OfflineChat может обнаруживать и использовать сервер мессенджера в локальной сети.</string>
     <key>NSLocationWhenInUseUsageDescription</key>

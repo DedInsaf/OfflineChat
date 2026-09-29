@@ -5,6 +5,7 @@ import CoreTransferable
 import AVKit
 import AVFoundation
 import UIKit
+import CoreLocation
 
 struct OnlineMessengerView: View {
     @ObservedObject var store: OnlineChatStore
@@ -280,69 +281,83 @@ private struct OnlineChatView: View {
     @State private var draft = ""
     @State private var showProfile = false
     @State private var showFilePicker = false
+    @State private var filePickerKind: OnlineFilePickerKind = .document
     @State private var showAttachmentMenu = false
     @State private var showMediaPicker = false
+    @State private var showCamera = false
     @State private var selectedMedia: PhotosPickerItem?
-    @State private var mediaKind: OnlineMediaKind = .photo
     @State private var downloadedFile: DownloadedOnlineFile?
     @State private var previewedMedia: PreviewedOnlineMedia?
     @State private var loadingMedia = false
+    @StateObject private var locationProvider = OnlineLocationProvider()
     @FocusState private var composerFocused: Bool
 
     private var profile: OnlineProfile? { store.profiles[peer] }
     private var items: [OnlineMessage] { store.messages[peer] ?? [] }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 6) {
-                        ForEach(items) { message in
-                            OnlineMessageBubble(
-                                message: message,
-                                outgoing: message.isOutgoing(for: store.username),
-                                onRetry: { Task { await store.retry(message) } },
-                                download: { reportErrors in
-                                    await store.downloadFile(message, reportErrors: reportErrors)
-                                },
-                                onOpenMedia: { url in
-                                    previewedMedia = PreviewedOnlineMedia(url: url, kind: message.attachment?.kind ?? "file")
-                                },
-                                onOpenFile: { url in downloadedFile = DownloadedOnlineFile(url: url) }
-                            )
-                            .id(message.id)
-                        }
-                        if store.typingPeers.contains(peer) {
-                            HStack {
-                                Text("печатает…")
-                                    .font(.system(size: 13))
-                                    .foregroundColor(.ocMuted)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 9)
-                                    .background(Color.ocIncoming)
-                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                                Spacer(minLength: 70)
+        ZStack(alignment: .bottomLeading) {
+            VStack(spacing: 0) {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 6) {
+                            ForEach(items) { message in
+                                OnlineMessageBubble(
+                                    message: message,
+                                    outgoing: message.isOutgoing(for: store.username),
+                                    onRetry: { Task { await store.retry(message) } },
+                                    download: { reportErrors in
+                                        await store.downloadFile(message, reportErrors: reportErrors)
+                                    },
+                                    onOpenMedia: { url in
+                                        previewedMedia = PreviewedOnlineMedia(url: url, kind: message.attachment?.kind ?? "file")
+                                    },
+                                    onOpenFile: { url in downloadedFile = DownloadedOnlineFile(url: url) }
+                                )
+                                .id(message.id)
+                            }
+                            if store.typingPeers.contains(peer) {
+                                HStack {
+                                    Text("печатает…")
+                                        .font(.system(size: 13))
+                                        .foregroundColor(.ocMuted)
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 9)
+                                        .background(Color.ocIncoming)
+                                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                    Spacer(minLength: 70)
+                                }
                             }
                         }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 12)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 12)
+                    .scrollDismissesKeyboard(.interactively)
+                    .onTapGesture { closeAttachmentMenu() }
+                    .onAppear { scrollToBottom(proxy, animated: false) }
+                    .onChange(of: items) { _, _ in scrollToBottom(proxy, animated: true) }
                 }
-                .scrollDismissesKeyboard(.interactively)
-                .onAppear { scrollToBottom(proxy, animated: false) }
-                .onChange(of: items) { _, _ in scrollToBottom(proxy, animated: true) }
-            }
-            if store.preparingFile || loadingMedia {
-                HStack(spacing: 9) {
-                    ProgressView().controlSize(.small)
-                    Text(loadingMedia ? "Оптимизируем медиа…" : "Подготавливаем вложение…")
-                        .font(.footnote.weight(.medium))
+                if store.preparingFile || loadingMedia {
+                    HStack(spacing: 9) {
+                        ProgressView().controlSize(.small)
+                        Text(loadingMedia ? "Оптимизируем медиа…" : "Подготавливаем вложение…")
+                            .font(.footnote.weight(.medium))
+                    }
+                    .foregroundStyle(Color.ocMuted)
+                    .padding(.vertical, 8)
+                    .transition(.opacity)
                 }
-                .foregroundStyle(Color.ocMuted)
-                .padding(.vertical, 8)
-                .transition(.opacity)
+                composer
             }
-            composer
+            if showAttachmentMenu {
+                OnlineAttachmentMenu { action in
+                    chooseAttachment(action)
+                }
+                .padding(.leading, 10)
+                .padding(.bottom, 66)
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomLeading)))
+                .zIndex(2)
+            }
         }
         .background(Color.ocChatBg)
         .navigationBarTitleDisplayMode(.inline)
@@ -369,28 +384,23 @@ private struct OnlineChatView: View {
         }
         .onAppear { store.openedChat(with: peer) }
         .onDisappear { store.closedChat(with: peer) }
-        .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [.item]) { result in
+        .fileImporter(isPresented: $showFilePicker,
+                      allowedContentTypes: filePickerKind == .audio ? [.audio] : [.item]) { result in
             switch result {
             case .success(let url): store.sendPickedFile(url, to: peer)
             case .failure(let error): store.fileError = error.localizedDescription
             }
         }
         .photosPicker(isPresented: $showMediaPicker, selection: $selectedMedia,
-                      matching: mediaKind == .photo ? .images : .videos,
+                      matching: .any(of: [.images, .videos]),
                       preferredItemEncoding: .automatic)
-        .confirmationDialog("Что отправить?", isPresented: $showAttachmentMenu, titleVisibility: .visible) {
-            Button("Фото", systemImage: "photo.fill") {
-                mediaKind = .photo
-                showMediaPicker = true
+        .fullScreenCover(isPresented: $showCamera) {
+            OnlineCameraPicker { image in
+                showCamera = false
+                guard let image else { return }
+                sendCameraPhoto(image)
             }
-            Button("Видео", systemImage: "video.fill") {
-                mediaKind = .video
-                showMediaPicker = true
-            }
-            Button("Файл", systemImage: "doc.fill") { showFilePicker = true }
-            Button("Отмена", role: .cancel) {}
-        } message: {
-            Text("Фото, видео или документ до 5 МБ")
+            .ignoresSafeArea()
         }
         .sheet(item: $downloadedFile) { file in
             OnlineDownloadedFileSheet(file: file)
@@ -413,9 +423,13 @@ private struct OnlineChatView: View {
         HStack(alignment: .bottom, spacing: 8) {
             Button {
                 composerFocused = false
-                showAttachmentMenu = true
+                withAnimation(.easeOut(duration: 0.14)) {
+                    showAttachmentMenu.toggle()
+                }
             } label: {
-                Image(systemName: "paperclip").font(.title2).frame(width: 38, height: 42)
+                Image(systemName: "paperclip")
+                    .font(.system(size: 20, weight: .regular))
+                    .frame(width: 38, height: 42)
             }
             .disabled(store.preparingFile || loadingMedia)
             .accessibilityLabel("Прикрепить фото, видео или файл до 5 МБ")
@@ -458,7 +472,8 @@ private struct OnlineChatView: View {
                 selectedMedia = nil
             }
             do {
-                if mediaKind == .video {
+                let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
+                if isVideo {
                     guard let movie = try await item.loadTransferable(type: PickedOnlineMovie.self) else {
                         throw OnlineFiles.failure("Не удалось прочитать выбранное видео")
                     }
@@ -482,10 +497,193 @@ private struct OnlineChatView: View {
         }
     }
 
+    private func chooseAttachment(_ action: OnlineAttachmentAction) {
+        closeAttachmentMenu()
+        switch action {
+        case .media:
+            showMediaPicker = true
+        case .file:
+            filePickerKind = .document
+            showFilePicker = true
+        case .camera:
+            guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+                store.fileError = "Камера недоступна на этом устройстве."
+                return
+            }
+            showCamera = true
+        case .audio:
+            filePickerKind = .audio
+            showFilePicker = true
+        case .location:
+            locationProvider.requestLocation { result in
+                switch result {
+                case .success(let coordinate):
+                    let latitude = String(format: "%.6f", coordinate.latitude)
+                    let longitude = String(format: "%.6f", coordinate.longitude)
+                    Task { await store.send("📍 Местоположение\nhttps://maps.apple.com/?ll=\(latitude),\(longitude)", to: peer) }
+                case .failure(let error):
+                    store.fileError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func closeAttachmentMenu() {
+        guard showAttachmentMenu else { return }
+        withAnimation(.easeOut(duration: 0.12)) { showAttachmentMenu = false }
+    }
+
+    private func sendCameraPhoto(_ image: UIImage) {
+        guard let data = image.jpegData(compressionQuality: 0.88) else {
+            store.fileError = "Не удалось подготовить фотографию."
+            return
+        }
+        loadingMedia = true
+        Task {
+            defer { loadingMedia = false }
+            do {
+                let prepared = try await OnlineMediaPreparation.photo(data)
+                await store.sendPickedMedia(prepared.data, name: prepared.name, to: peer)
+            } catch {
+                store.fileError = error.localizedDescription
+            }
+        }
+    }
+
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
         guard let last = items.last else { return }
         let action = { proxy.scrollTo(last.id, anchor: .bottom) }
         if animated { withAnimation(.easeOut(duration: 0.2), action) } else { action() }
+    }
+}
+
+private enum OnlineFilePickerKind { case document, audio }
+
+private enum OnlineAttachmentAction: CaseIterable {
+    case media, file, camera, audio, location
+
+    var title: String {
+        switch self {
+        case .media: "Фото или видео"
+        case .file: "Файл"
+        case .camera: "Камера"
+        case .audio: "Звук"
+        case .location: "Местоположение"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .media: "photo.on.rectangle.angled"
+        case .file: "doc"
+        case .camera: "camera"
+        case .audio: "waveform"
+        case .location: "location"
+        }
+    }
+}
+
+private struct OnlineAttachmentMenu: View {
+    let onPick: (OnlineAttachmentAction) -> Void
+
+    var body: some View {
+        VStack(spacing: 1) {
+            ForEach(OnlineAttachmentAction.allCases, id: \.self) { action in
+                Button { onPick(action) } label: {
+                    HStack(spacing: 13) {
+                        Image(systemName: action.symbol)
+                            .font(.system(size: 18, weight: .regular))
+                            .frame(width: 25, height: 24)
+                        Text(action.title)
+                            .font(.system(size: 17, weight: .regular))
+                        Spacer(minLength: 8)
+                    }
+                    .foregroundStyle(Color.ocText)
+                    .frame(height: 43)
+                    .padding(.horizontal, 14)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(width: 238)
+        .padding(.vertical, 7)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 16, y: 7)
+    }
+}
+
+private final class OnlineLocationProvider: NSObject, ObservableObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var completion: ((Result<CLLocationCoordinate2D, Error>) -> Void)?
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
+    func requestLocation(completion: @escaping (Result<CLLocationCoordinate2D, Error>) -> Void) {
+        self.completion = completion
+        switch manager.authorizationStatus {
+        case .notDetermined: manager.requestWhenInUseAuthorization()
+        case .authorizedAlways, .authorizedWhenInUse: manager.requestLocation()
+        default: finish(.failure(OnlineFiles.failure("Разрешите доступ к геопозиции в Настройках iPhone.")))
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if manager.authorizationStatus == .authorizedAlways || manager.authorizationStatus == .authorizedWhenInUse {
+            manager.requestLocation()
+        } else if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
+            finish(.failure(OnlineFiles.failure("Разрешите доступ к геопозиции в Настройках iPhone.")))
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let coordinate = locations.last?.coordinate else { return }
+        finish(.success(coordinate))
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        finish(.failure(error))
+    }
+
+    private func finish(_ result: Result<CLLocationCoordinate2D, Error>) {
+        DispatchQueue.main.async {
+            let callback = self.completion
+            self.completion = nil
+            callback?(result)
+        }
+    }
+}
+
+private struct OnlineCameraPicker: UIViewControllerRepresentable {
+    let completion: (UIImage?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(completion: completion) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let controller = UIImagePickerController()
+        controller.sourceType = .camera
+        controller.cameraCaptureMode = .photo
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let completion: (UIImage?) -> Void
+        init(completion: @escaping (UIImage?) -> Void) { self.completion = completion }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            completion(info[.originalImage] as? UIImage)
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { completion(nil) }
     }
 }
 
@@ -637,11 +835,6 @@ private struct PreviewedOnlineMedia: Identifiable {
     let id = UUID()
     let url: URL
     let kind: String
-}
-
-private enum OnlineMediaKind {
-    case photo
-    case video
 }
 
 private struct PickedOnlineMovie: Transferable {

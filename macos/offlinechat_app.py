@@ -573,6 +573,119 @@ class Avatar(tk.Canvas):
             self.create_text(size / 2, size / 2, text=initials_for(title), fill=THEME["accent"], font=ui_font(11 if size < 48 else 14, "bold"))
 
 
+class ClipButton(tk.Canvas):
+    def __init__(self, master, command=None, **kwargs):
+        super().__init__(master, width=36, height=36, highlightthickness=0, bd=0, bg=parent_bg(master), cursor="hand2", **kwargs)
+        self.command = command
+        self.open = False
+        self._hover = False
+        self.bind("<Button-1>", lambda _e: self.command and self.command())
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.after_idle(self.redraw)
+
+    def set_open(self, opened):
+        self.open = bool(opened)
+        self.redraw()
+
+    def _set_hover(self, on):
+        self._hover = on
+        self.redraw()
+
+    def redraw(self):
+        self.delete("all")
+        color = THEME["text"] if self._hover or self.open else THEME["muted"]
+        self.create_line(
+            11, 22, 20, 13, 24, 13, 27, 16, 27, 20, 17, 30,
+            12, 30, 8, 26, 8, 21, 20, 9, 25, 9, 30, 14,
+            fill=color, width=2.0, capstyle=tk.ROUND, joinstyle=tk.ROUND, smooth=True,
+        )
+
+
+class AttachDock(tk.Canvas):
+    """Компактное вертикальное меню вложений без тяжёлой покадровой анимации."""
+
+    def __init__(self, master, on_pick, on_close):
+        self.width = 250
+        self.row_height = 43
+        self.padding = 9
+        self.items = [
+            ("media", "Фото или видео"),
+            ("file", "Файл"),
+            ("audio", "Звук"),
+            ("location", "Местоположение"),
+        ]
+        self.height = self.padding * 2 + self.row_height * len(self.items)
+        super().__init__(master, width=self.width, height=self.height, highlightthickness=0, bd=0,
+                         bg=THEME["chat_bg"], cursor="arrow")
+        self.on_pick = on_pick
+        self.on_close = on_close
+        self.closing = False
+        self.hovered = None
+        self.bind("<Motion>", self._motion)
+        self.bind("<Leave>", self._leave)
+        self.bind("<Button-1>", self._click)
+        self._draw()
+
+    def dismiss(self, done=None):
+        self.closing = True
+        if done:
+            done()
+
+    def _motion(self, event):
+        index = int((event.y - self.padding) // self.row_height)
+        hovered = index if 0 <= index < len(self.items) else None
+        if hovered != self.hovered:
+            self.hovered = hovered
+            self._draw()
+
+    def _leave(self, _event):
+        if self.hovered is not None:
+            self.hovered = None
+            self._draw()
+
+    def _click(self, event):
+        if self.closing:
+            return
+        index = int((event.y - self.padding) // self.row_height)
+        if 0 <= index < len(self.items):
+            self.on_pick(self.items[index][0])
+
+    def _draw(self):
+        self.delete("all")
+        round_rect(self, 2, 2, self.width - 2, self.height - 2, 20, fill=THEME["surface"], outline="")
+        for index, (kind, title) in enumerate(self.items):
+            top = self.padding + index * self.row_height
+            center_y = top + self.row_height / 2
+            if index == self.hovered:
+                round_rect(self, 7, top + 2, self.width - 7, top + self.row_height - 2, 12,
+                           fill=THEME["surface_alt"], outline="")
+            self._icon(kind, 28, center_y)
+            self.create_text(52, center_y, text=title, anchor="w", fill=THEME["text"], font=ui_font(14))
+
+    def _icon(self, kind, x, y):
+        ink = THEME["text"]
+        width = 1.8
+        if kind == "media":
+            round_rect(self, x - 9, y - 8, x + 9, y + 8, 3, fill="", outline=ink, width=width)
+            self.create_oval(x + 2, y - 5, x + 6, y - 1, outline=ink, width=width)
+            self.create_line(x - 7, y + 5, x - 2, y, x + 2, y + 4, x + 5, y + 1, x + 8, y + 5,
+                             fill=ink, width=width, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+        elif kind == "file":
+            self.create_line(x - 7, y - 9, x + 2, y - 9, x + 8, y - 3, x + 8, y + 9,
+                             x - 7, y + 9, x - 7, y - 9, fill=ink, width=width, joinstyle=tk.ROUND)
+            self.create_line(x + 2, y - 9, x + 2, y - 3, x + 8, y - 3, fill=ink, width=width)
+        elif kind == "audio":
+            self.create_line(x + 3, y - 9, x + 3, y + 5, fill=ink, width=width)
+            self.create_line(x + 3, y - 9, x + 9, y - 11, fill=ink, width=width)
+            self.create_oval(x - 4, y + 3, x + 3, y + 9, outline=ink, width=width)
+        else:
+            self.create_oval(x - 8, y - 10, x + 8, y + 6, outline=ink, width=width)
+            self.create_oval(x - 2.5, y - 5, x + 2.5, y, outline=ink, width=width)
+            self.create_line(x - 6, y + 3, x, y + 11, x + 6, y + 3, fill=ink, width=width,
+                             capstyle=tk.ROUND, joinstyle=tk.ROUND)
+
+
 class ScrollFrame(tk.Frame):
     def __init__(self, master, bg=None, **kwargs):
         bg = bg or THEME["surface"]
@@ -1410,6 +1523,8 @@ class App:
         self._read_job = None
         self.modal_overlay = None
         self.attachment_menu = None
+        self.last_coords = None
+        self.online_location_pending_peer = None
         init_fonts(root)
         harden_tk(root)
         self.build()
@@ -1678,6 +1793,7 @@ class App:
         self.online_chats.setdefault(name, [])
         if not hasattr(self, "online"):
             return
+        self.attachment_menu = None
         for child in self.online.winfo_children():
             child.destroy()
         head = tk.Frame(self.online, bg=THEME["surface"], highlightbackground=THEME["line"], highlightthickness=1)
@@ -1714,8 +1830,7 @@ class App:
         bar.pack(fill="x")
         inner = tk.Frame(bar, bg=THEME["surface_alt"], highlightbackground=THEME["line"], highlightthickness=1)
         inner.pack(fill="x", padx=12, pady=10)
-        self.attachment_button = PillButton(inner, "📎", command=self.toggle_online_attachment_menu,
-                                            variant="ghost", width=42, height=36)
+        self.attachment_button = ClipButton(inner, command=self.toggle_online_attachment_menu)
         self.attachment_button.pack(side="left", padx=6, pady=6)
         self.online_entry = tk.Entry(inner, bg=THEME["surface_alt"], fg=THEME["text"], insertbackground=THEME["text"], disabledforeground=THEME["subtle"], selectbackground=THEME["primary"], selectforeground=THEME["primary_fg"], relief="flat", borderwidth=0, highlightthickness=0, font=ui_font(14))
         self.online_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=12)
@@ -1868,16 +1983,19 @@ class App:
         text = self.online_entry.get().strip()
         if not text:
             return
+        self.online_entry.delete(0, tk.END)
+        self.queue_online_text(self.active_online_chat, text)
+
+    def queue_online_text(self, recipient, text):
         local_id = str(uuid.uuid4())
         item = {
             "text": text, "outgoing": True, "status": "sending", "local_id": local_id,
             "created_at": time.time(), "sort_at": time.time(),
         }
-        self.online_chats.setdefault(self.active_online_chat, []).append(item)
+        self.online_chats.setdefault(recipient, []).append(item)
         self.schedule_save_chats()
-        self.online_command_queue.put({"type": "online_send", "recipient": self.active_online_chat, "text": text, "local_id": local_id})
-        self.online_entry.delete(0, tk.END)
-        if self.online_transcript:
+        self.online_command_queue.put({"type": "online_send", "recipient": recipient, "text": text, "local_id": local_id})
+        if self.online_transcript and self.active_online_chat == recipient:
             self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id)
         self._list_dirty = True
 
@@ -1887,43 +2005,59 @@ class App:
             return
         if not hasattr(self, "online") or not self.active_online_chat:
             return
+        dock = AttachDock(self.online, on_pick=self.choose_online_attachment, on_close=self.close_online_attachment_menu)
+        self.attachment_menu = dock
+        self.online.update_idletasks()
         try:
-            self.online_entry.focus_set()
-            self.root.focus_set()
+            button = self.attachment_button
+            ax = button.winfo_rootx() - self.online.winfo_rootx()
+            ay = button.winfo_rooty() - self.online.winfo_rooty()
+            dock.place(x=max(8, ax - 10), y=max(8, ay - dock.height - 8))
         except Exception:
-            pass
-        menu = tk.Frame(self.online, bg=THEME["surface"], padx=6, pady=6)
-        self.attachment_menu = menu
-        for title, kind in (("Фото", "photo"), ("Видео", "video"), ("Документ", "file")):
-            PillButton(menu, title,
-                       command=lambda value=kind: self.choose_online_attachment(value),
-                       variant="ghost", width=154, height=40).pack(fill="x", pady=2)
-        menu.place(x=16, rely=1.0, y=-22, anchor="sw")
-        menu.lift()
-        menu.place_configure(y=-78)
+            dock.place(x=12, rely=1.0, y=-70, anchor="sw")
+        dock.lift()
         if hasattr(self, "attachment_button"):
-            self.attachment_button.set_text("×")
+            self.attachment_button.set_open(True)
 
     def close_online_attachment_menu(self):
         menu = self.attachment_menu
         if menu is None:
             return
         if hasattr(self, "attachment_button"):
-            self.attachment_button.set_text("📎")
-        menu.destroy()
-        self.attachment_menu = None
+            self.attachment_button.set_open(False)
+
+        def finish():
+            if self.attachment_menu is menu:
+                self.attachment_menu = None
+            try:
+                menu.destroy()
+            except Exception:
+                pass
+
+        if isinstance(menu, AttachDock) and not menu.closing:
+            menu.dismiss(finish)
+        else:
+            finish()
 
     def choose_online_attachment(self, kind):
         self.close_online_attachment_menu()
-        prompts = {"photo": "Выберите фотографию — приложение уменьшит её перед отправкой",
-                   "video": "Выберите видео — приложение сожмёт его перед отправкой",
-                   "file": "Выберите документ до 5 МБ"}
+        if kind == "location":
+            if self.last_coords:
+                self.queue_online_text(self.active_online_chat, "📍 Местоположение\nhttps://maps.apple.com/?ll=" + self.last_coords)
+                return
+            self.online_location_pending_peer = self.active_online_chat
+            self.command_queue.put({"type": "gps"})
+            self.set_status("Определяем местоположение", THEME["warning"], "Подождите несколько секунд")
+            return
+        prompts = {"media": "Выберите фотографию или видео — приложение оптимизирует его перед отправкой",
+                   "audio": "Выберите аудиофайл до 5 МБ",
+                   "file": "Выберите файл до 5 МБ"}
         self.set_status("Выбор вложения", THEME["warning"], prompts.get(kind, prompts["file"]))
         try:
             self.root.update_idletasks()
             filetypes = {
-                "photo": [("Фотографии", "*.jpg *.jpeg *.png *.gif *.heic *.heif *.webp *.tif *.tiff"), ("Все файлы", "*.*")],
-                "video": [("Видео", "*.mov *.mp4 *.m4v *.avi *.mkv *.webm"), ("Все файлы", "*.*")],
+                "media": [("Фото и видео", "*.jpg *.jpeg *.png *.gif *.heic *.heif *.webp *.tif *.tiff *.mov *.mp4 *.m4v *.avi *.mkv *.webm"), ("Все файлы", "*.*")],
+                "audio": [("Аудио", "*.mp3 *.m4a *.aac *.wav *.aiff *.flac *.ogg"), ("Все файлы", "*.*")],
                 "file": [("Все файлы", "*.*")],
             }
             path = filedialog.askopenfilename(parent=self.root, title=prompts.get(kind, prompts["file"]),
@@ -1945,14 +2079,14 @@ class App:
             return
         try:
             size = os.path.getsize(path)
-            input_limit = 200 * 1024 * 1024 if kind in ("photo", "video") else 5 * 1024 * 1024
+            input_limit = 200 * 1024 * 1024 if kind == "media" else 5 * 1024 * 1024
             if not 0 < size <= input_limit:
                 raise ValueError("Выберите непустой %s размером до %s МБ" %
-                                 ("медиафайл" if kind in ("photo", "video") else "файл",
-                                  200 if kind in ("photo", "video") else 5))
+                                 ("медиафайл" if kind == "media" else "файл",
+                                  200 if kind == "media" else 5))
             actual_kind = attachment_kind(path)
-            if kind in ("photo", "video") and actual_kind != kind:
-                raise ValueError("Выбранный файл не является %s" % ("фотографией" if kind == "photo" else "видео"))
+            if kind == "media" and actual_kind not in ("photo", "video"):
+                raise ValueError("Выбранный файл не является фотографией или видео")
         except (OSError, ValueError) as error:
             self.set_status("Файл не отправлен", THEME["danger"], str(error))
             return
@@ -2732,9 +2866,18 @@ class App:
         elif kind == "gps":
             coords = event.get("coords", "-")
             self.last_coords = None if coords == "-" else coords
-            self.coord_label.config(text=f"Координаты: {coords}")
+            if hasattr(self, "coord_label"):
+                self.coord_label.config(text=f"Координаты: {coords}")
             acc = event.get("acc")
-            self.acc_label.config(text=f"Точность около {acc} м" if acc else message)
+            if hasattr(self, "acc_label"):
+                self.acc_label.config(text=f"Точность около {acc} м" if acc else message)
+            pending_peer = self.online_location_pending_peer
+            self.online_location_pending_peer = None
+            if pending_peer and self.last_coords:
+                self.queue_online_text(pending_peer, "📍 Местоположение\nhttps://maps.apple.com/?ll=" + self.last_coords)
+                self.set_status("Местоположение отправлено", THEME["success"], "Ссылка откроется в Картах")
+            elif pending_peer:
+                self.set_status("Геопозиция недоступна", THEME["danger"], message)
         elif kind == "sos_on":
             self.set_status("Маяк", THEME["danger"], message)
         elif kind == "sos_off":
