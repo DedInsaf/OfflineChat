@@ -41,13 +41,13 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
     typing_state = set()
     pending_deliveries = set()
     pending_reads = {}
-    transfers = ThreadPoolExecutor(max_workers=1, thread_name_prefix="online-files")
+    transfers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="online-files")
 
     def transfer(command, current_username):
         file_api = OnlineAPI(server_url)
         try:
             if command["type"] == "online_send_file":
-                staged = stage(command["file_path"], command["local_id"])
+                staged = stage(command["file_path"], command["local_id"], media_kind=command.get("media_kind"))
                 message = file_api.send_file(current_username, command["recipient"],
                                             command["local_id"], staged, token)
                 emit("online_message_sync", message=message, source="send")
@@ -64,7 +64,9 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
                 finally:
                     if temporary and os.path.exists(temporary):
                         os.unlink(temporary)
-                emit("online_file_saved", path=destination)
+                emit(command.get("success_event") or "online_file_saved", path=destination,
+                     local_id=command.get("local_id"), media_kind=command.get("media_kind"),
+                     open_after=bool(command.get("open_after")))
         except Exception as exc:
             if command["type"] == "online_send_file":
                 emit("online_send_failed", recipient=command["recipient"], local_id=command["local_id"], message=_error_text(exc))

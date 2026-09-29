@@ -13,6 +13,11 @@ from chat_server.database import MAX_FILE_BYTES
 from chat_server.wsgi import create_application
 from online_chat.files import stage, discard
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 
 class FileTests(unittest.TestCase):
     def setUp(self):
@@ -107,3 +112,13 @@ class FileTests(unittest.TestCase):
         self.assertEqual(Path(copied).read_bytes(), b"first")
         discard(copied)
         self.assertFalse(Path(copied).exists())
+
+    @unittest.skipIf(Image is None, "Pillow is not installed")
+    def test_photo_is_optimized_for_media_message(self):
+        source = Path(self.directory.name) / "camera.png"
+        Image.new("RGB", (2600, 1800), (80, 160, 220)).save(source, "PNG")
+        copied = Path(stage(source, str(uuid.uuid4()), Path(self.directory.name) / "uploads", media_kind="photo"))
+        self.assertEqual(copied.suffix, ".jpg")
+        self.assertLess(copied.stat().st_size, source.stat().st_size)
+        with Image.open(copied) as optimized:
+            self.assertLessEqual(max(optimized.size), 1920)

@@ -2,6 +2,9 @@ import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
 import CoreTransferable
+import AVKit
+import AVFoundation
+import UIKit
 
 struct OnlineMessengerView: View {
     @ObservedObject var store: OnlineChatStore
@@ -282,7 +285,7 @@ private struct OnlineChatView: View {
     @State private var selectedMedia: PhotosPickerItem?
     @State private var mediaKind: OnlineMediaKind = .photo
     @State private var downloadedFile: DownloadedOnlineFile?
-    @State private var downloading = false
+    @State private var previewedMedia: PreviewedOnlineMedia?
     @State private var loadingMedia = false
     @FocusState private var composerFocused: Bool
 
@@ -299,16 +302,13 @@ private struct OnlineChatView: View {
                                 message: message,
                                 outgoing: message.isOutgoing(for: store.username),
                                 onRetry: { Task { await store.retry(message) } },
-                                onDownload: {
-                                    guard !downloading else { return }
-                                    downloading = true
-                                    Task {
-                                        if let url = await store.downloadFile(message) {
-                                            downloadedFile = DownloadedOnlineFile(url: url)
-                                        }
-                                        downloading = false
-                                    }
-                                }
+                                download: { reportErrors in
+                                    await store.downloadFile(message, reportErrors: reportErrors)
+                                },
+                                onOpenMedia: { url in
+                                    previewedMedia = PreviewedOnlineMedia(url: url, kind: message.attachment?.kind ?? "file")
+                                },
+                                onOpenFile: { url in downloadedFile = DownloadedOnlineFile(url: url) }
                             )
                             .id(message.id)
                         }
@@ -332,8 +332,16 @@ private struct OnlineChatView: View {
                 .onAppear { scrollToBottom(proxy, animated: false) }
                 .onChange(of: items) { _, _ in scrollToBottom(proxy, animated: true) }
             }
-            if downloading { ProgressView("Скачивание файла…").padding(8) }
-            if store.preparingFile || loadingMedia { ProgressView("Подготовка вложения…").padding(8) }
+            if store.preparingFile || loadingMedia {
+                HStack(spacing: 9) {
+                    ProgressView().controlSize(.small)
+                    Text(loadingMedia ? "Оптимизируем медиа…" : "Подготавливаем вложение…")
+                        .font(.footnote.weight(.medium))
+                }
+                .foregroundStyle(Color.ocMuted)
+                .padding(.vertical, 8)
+                .transition(.opacity)
+            }
             composer
         }
         .background(Color.ocChatBg)
@@ -388,6 +396,9 @@ private struct OnlineChatView: View {
             OnlineDownloadedFileSheet(file: file)
                 .presentationDetents([.height(280)])
                 .presentationDragIndicator(.visible)
+        }
+        .fullScreenCover(item: $previewedMedia) { media in
+            OnlineMediaViewer(media: media)
         }
         .onChange(of: selectedMedia) { _, item in
             guard let item else { return }
@@ -451,17 +462,19 @@ private struct OnlineChatView: View {
                     guard let movie = try await item.loadTransferable(type: PickedOnlineMovie.self) else {
                         throw OnlineFiles.failure("Не удалось прочитать выбранное видео")
                     }
-                    let data = try await Task.detached(priority: .utility) { try OnlineFiles.read(movie.url) }.value
-                    defer { try? FileManager.default.removeItem(at: movie.url) }
-                    await store.sendPickedMedia(data, name: movie.url.lastPathComponent, to: peer)
+                    let prepared = try await OnlineMediaPreparation.video(at: movie.url)
+                    defer {
+                        try? FileManager.default.removeItem(at: movie.url)
+                        if prepared.url != movie.url { try? FileManager.default.removeItem(at: prepared.url) }
+                    }
+                    let data = try await Task.detached(priority: .utility) { try OnlineFiles.read(prepared.url) }.value
+                    await store.sendPickedMedia(data, name: prepared.name, to: peer)
                 } else {
                     guard let data = try await item.loadTransferable(type: Data.self) else {
                         throw OnlineFiles.failure("Не удалось прочитать выбранную фотографию")
                     }
-                    let type = item.supportedContentTypes.first
-                    let ext = type?.preferredFilenameExtension ?? "jpg"
-                    let stamp = Int(Date().timeIntervalSince1970)
-                    await store.sendPickedMedia(data, name: "Фото-\(stamp).\(ext)", to: peer)
+                    let prepared = try await OnlineMediaPreparation.photo(data)
+                    await store.sendPickedMedia(prepared.data, name: prepared.name, to: peer)
                 }
             } catch {
                 store.fileError = error.localizedDescription
@@ -480,30 +493,18 @@ private struct OnlineMessageBubble: View {
     let message: OnlineMessage
     let outgoing: Bool
     let onRetry: () -> Void
-    let onDownload: () -> Void
+    let download: (Bool) async -> URL?
+    let onOpenMedia: (URL) -> Void
+    let onOpenFile: (URL) -> Void
+    @State private var mediaURL: URL?
+    @State private var loading = false
 
     var body: some View {
         HStack(alignment: .bottom) {
             if outgoing { Spacer(minLength: 54) }
             VStack(alignment: .leading, spacing: 3) {
                 if let attachment = message.attachment {
-                    Button(action: onDownload) {
-                        HStack(spacing: 11) {
-                            Image(systemName: attachment.iconName)
-                                .font(.system(size: 20, weight: .semibold))
-                                .frame(width: 42, height: 42)
-                                .background((outgoing ? Color.white : Color.ocPrimary).opacity(0.16))
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(attachment.name).font(.system(size: 14, weight: .semibold)).lineLimit(2)
-                                Text("\(attachment.sizeText) · Нажмите, чтобы скачать").font(.caption2).opacity(0.72)
-                            }
-                            Image(systemName: "arrow.down.circle.fill").font(.title3)
-                        }
-                        .foregroundColor(outgoing ? .ocPrimaryFg : .ocText)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(message.serverID == nil)
+                    attachmentContent(attachment)
                 } else {
                     Text(message.text)
                         .font(.system(size: 16))
@@ -524,12 +525,118 @@ private struct OnlineMessageBubble: View {
             .onTapGesture { if message.status == .failed { onRetry() } }
             if !outgoing { Spacer(minLength: 54) }
         }
+        .task(id: message.serverID) {
+            guard message.attachment?.kind == "photo", mediaURL == nil, message.serverID != nil else { return }
+            await load(openWhenReady: false)
+        }
+    }
+
+    @ViewBuilder
+    private func attachmentContent(_ attachment: OnlineAttachment) -> some View {
+        switch attachment.kind {
+        case "photo":
+            Button { Task { await load(openWhenReady: true) } } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.black.opacity(0.08))
+                        .frame(width: 246, height: 184)
+                    if let mediaURL, let image = UIImage(contentsOfFile: mediaURL.path) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 246, height: 184)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    } else if loading {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "photo")
+                            .font(.system(size: 34, weight: .light))
+                            .foregroundStyle(outgoing ? Color.ocPrimaryFg.opacity(0.76) : Color.ocMuted)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(message.serverID == nil)
+        case "video":
+            Button { Task { await load(openWhenReady: true) } } label: {
+                ZStack {
+                    LinearGradient(colors: [Color.black.opacity(0.76), Color.black.opacity(0.48)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    VStack(spacing: 10) {
+                        ZStack {
+                            Circle().fill(.white.opacity(0.94)).frame(width: 54, height: 54)
+                            if loading {
+                                ProgressView().tint(.black)
+                            } else {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundStyle(.black.opacity(0.82))
+                                    .offset(x: 2)
+                            }
+                        }
+                        Text(loading ? "Загружаем видео…" : "Видео · \(attachment.sizeText)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
+                }
+                .frame(width: 246, height: 150)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(message.serverID == nil || loading)
+        default:
+            Button { Task { await load(openWhenReady: true) } } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "doc.fill")
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(outgoing ? Color.ocPrimaryFg : Color.ocPrimary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(attachment.name).font(.system(size: 14, weight: .semibold)).lineLimit(2)
+                        Text(loading ? "Загрузка…" : attachment.sizeText).font(.caption).opacity(0.65)
+                    }
+                    Spacer(minLength: 8)
+                    if loading { ProgressView().controlSize(.small) }
+                    else { Image(systemName: "arrow.down").font(.system(size: 14, weight: .semibold)) }
+                }
+                .foregroundColor(outgoing ? .ocPrimaryFg : .ocText)
+                .frame(width: 236)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(message.serverID == nil || loading)
+        }
+    }
+
+    @MainActor
+    private func load(openWhenReady: Bool) async {
+        if let mediaURL {
+            if openWhenReady { open(mediaURL) }
+            return
+        }
+        guard !loading, message.serverID != nil else { return }
+        loading = true
+        let url = await download(openWhenReady)
+        loading = false
+        guard let url else { return }
+        mediaURL = url
+        if openWhenReady { open(url) }
+    }
+
+    private func open(_ url: URL) {
+        if message.attachment?.kind == "file" { onOpenFile(url) }
+        else { onOpenMedia(url) }
     }
 }
 
 private struct DownloadedOnlineFile: Identifiable {
     let id = UUID()
     let url: URL
+}
+
+private struct PreviewedOnlineMedia: Identifiable {
+    let id = UUID()
+    let url: URL
+    let kind: String
 }
 
 private enum OnlineMediaKind {
@@ -550,6 +657,125 @@ private struct PickedOnlineMovie: Transferable {
             try FileManager.default.copyItem(at: received.file, to: copy)
             return PickedOnlineMovie(url: copy)
         }
+    }
+}
+
+private enum OnlineMediaPreparation {
+    struct Photo {
+        let data: Data
+        let name: String
+    }
+
+    struct Video {
+        let url: URL
+        let name: String
+    }
+
+    static func photo(_ source: Data) async throws -> Photo {
+        try await Task.detached(priority: .userInitiated) {
+            guard let original = UIImage(data: source) else {
+                throw OnlineFiles.failure("Не удалось прочитать фотографию")
+            }
+            let maxSide: CGFloat = 1920
+            let sourceSize = original.size
+            let scale = min(1, maxSide / max(sourceSize.width, sourceSize.height))
+            let image: UIImage
+            if scale < 1 {
+                let target = CGSize(width: max(1, sourceSize.width * scale), height: max(1, sourceSize.height * scale))
+                let renderer = UIGraphicsImageRenderer(size: target)
+                image = renderer.image { _ in original.draw(in: CGRect(origin: .zero, size: target)) }
+            } else {
+                image = original
+            }
+            var quality: CGFloat = 0.82
+            var encoded = image.jpegData(compressionQuality: quality)
+            while let value = encoded, value.count > OnlineFiles.limit, quality > 0.34 {
+                quality -= 0.12
+                encoded = image.jpegData(compressionQuality: quality)
+            }
+            guard let encoded, !encoded.isEmpty, encoded.count <= OnlineFiles.limit else {
+                throw OnlineFiles.failure("Фотографию не удалось уменьшить до 5 МБ")
+            }
+            return Photo(data: encoded, name: "Фото-\(Int(Date().timeIntervalSince1970)).jpg")
+        }.value
+    }
+
+    static func video(at source: URL) async throws -> Video {
+        let asset = AVURLAsset(url: source)
+        for preset in [AVAssetExportPresetMediumQuality, AVAssetExportPresetLowQuality] {
+            guard let exporter = AVAssetExportSession(asset: asset, presetName: preset) else { continue }
+            let output = FileManager.default.temporaryDirectory
+                .appendingPathComponent("Видео-\(UUID().uuidString).mp4")
+            do {
+                try await exporter.export(to: output, as: .mp4)
+                let size = (try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                if size > 0, size <= OnlineFiles.limit {
+                    return Video(url: output, name: "Видео-\(Int(Date().timeIntervalSince1970)).mp4")
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: output)
+                continue
+            }
+            try? FileManager.default.removeItem(at: output)
+        }
+        let size = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if size > 0, size <= OnlineFiles.limit {
+            return Video(url: source, name: "Видео-\(Int(Date().timeIntervalSince1970)).mov")
+        }
+        throw OnlineFiles.failure("Видео слишком длинное. После сжатия оно всё ещё больше 5 МБ")
+    }
+}
+
+private struct OnlineMediaViewer: View {
+    let media: PreviewedOnlineMedia
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer
+
+    init(media: PreviewedOnlineMedia) {
+        self.media = media
+        _player = State(initialValue: AVPlayer(url: media.url))
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if media.kind == "video" {
+                VideoPlayer(player: player)
+                    .ignoresSafeArea(edges: .horizontal)
+                    .onAppear { player.play() }
+                    .onDisappear { player.pause() }
+            } else if let image = UIImage(contentsOfFile: media.url.path) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(.vertical, 54)
+            } else {
+                ContentUnavailableView("Не удалось открыть медиа", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.white)
+            }
+            VStack {
+                HStack(spacing: 14) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .bold))
+                            .frame(width: 42, height: 42)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    Spacer()
+                    ShareLink(item: media.url) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 17, weight: .semibold))
+                            .frame(width: 42, height: 42)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                Spacer()
+            }
+        }
+        .statusBarHidden()
     }
 }
 

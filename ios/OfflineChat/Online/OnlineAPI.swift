@@ -150,6 +150,9 @@ final class OnlineAPI {
         guard let id = message.serverID, let attachment = message.attachment else {
             throw OnlineFiles.failure("Дождитесь отправки файла")
         }
+        if let cached = await OnlineFiles.cachedDownload(attachment, id: message.clientID) {
+            return cached
+        }
         struct Body: Encodable {
             let username: String
             let owner_token: String

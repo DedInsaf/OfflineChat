@@ -71,9 +71,15 @@ struct OfflineChatTests {
     }
 
     @Test func attachmentKindsChooseUsefulCards() {
-        #expect(OnlineAttachment(name: "cat.HEIC", size: 1, sha256: "x").kind == "photo")
-        #expect(OnlineAttachment(name: "clip.mp4", size: 1, sha256: "x").kind == "video")
+        let photo = OnlineAttachment(name: "cat.HEIC", size: 1, sha256: "x")
+        let video = OnlineAttachment(name: "clip.mp4", size: 1, sha256: "x")
+        #expect(photo.kind == "photo")
+        #expect(video.kind == "video")
         #expect(OnlineAttachment(name: "archive.zip", size: 1, sha256: "x").kind == "file")
+        #expect(OnlineMessage(clientID: UUID(), sender: "anna", recipient: "boris", text: "",
+                              createdAt: Date(), status: .sent, attachment: photo).previewText == "Фото")
+        #expect(OnlineMessage(clientID: UUID(), sender: "anna", recipient: "boris", text: "",
+                              createdAt: Date(), status: .sent, attachment: video).previewText == "Видео")
     }
 
     @Test func pickedMediaCanBeStagedAndEncoded() async throws {

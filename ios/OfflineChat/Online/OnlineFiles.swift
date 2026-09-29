@@ -98,6 +98,18 @@ enum OnlineFiles {
         }.value
     }
 
+    static func cachedDownload(_ attachment: OnlineAttachment, id: UUID) async -> URL? {
+        await Task.detached(priority: .utility) {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("OnlineDownloads").appendingPathComponent(id.uuidString)
+                .appendingPathComponent(attachment.name)
+            guard FileManager.default.fileExists(atPath: url.path),
+                  let data = try? readDirect(url), data.count == attachment.size,
+                  digest(data) == attachment.sha256 else { return nil }
+            return url
+        }.value
+    }
+
     static func removeStaged(_ id: UUID) async {
         await Task.detached(priority: .utility) {
             if let directory = try? folder(id) { try? FileManager.default.removeItem(at: directory) }

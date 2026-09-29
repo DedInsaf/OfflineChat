@@ -50,7 +50,14 @@ struct OnlineMessage: Codable, Equatable, Identifiable {
     var status: OnlineMessageStatus
     var attachment: OnlineAttachment? = nil
 
-    var previewText: String { attachment.map { "📎 " + $0.name } ?? text }
+    var previewText: String {
+        guard let attachment else { return text }
+        switch attachment.kind {
+        case "photo": return "Фото"
+        case "video": return "Видео"
+        default: return "📎 " + attachment.name
+        }
+    }
 
     var id: UUID { clientID }
 
@@ -83,13 +90,6 @@ struct OnlineAttachment: Codable, Equatable {
         return "file"
     }
 
-    var iconName: String {
-        switch kind {
-        case "photo": return "photo.fill"
-        case "video": return "play.rectangle.fill"
-        default: return "doc.fill"
-        }
-    }
 }
 
 struct OnlineEvent: Decodable {

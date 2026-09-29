@@ -348,10 +348,13 @@ final class OnlineChatStore: ObservableObject {
         }
     }
 
-    func downloadFile(_ message: OnlineMessage) async -> URL? {
-        fileError = ""
+    func downloadFile(_ message: OnlineMessage, reportErrors: Bool = true) async -> URL? {
+        if reportErrors { fileError = "" }
         do { return try await api.download(message, username: username, ownerToken: ownerToken) }
-        catch { fileError = error.localizedDescription; return nil }
+        catch {
+            if reportErrors { fileError = error.localizedDescription }
+            return nil
+        }
     }
 
     func openedChat(with peer: String) {

@@ -16,6 +16,22 @@ import hashlib
 import tempfile
 from urllib.parse import quote
 
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = None
+    ImageTk = None
+
+try:
+    import objc
+    from AppKit import NSApp, NSView, NSButton, NSColor, NSViewWidthSizable, NSViewHeightSizable
+    from AVKit import AVPlayerView
+    from AVFoundation import AVPlayer
+    from Foundation import NSObject, NSURL
+except ImportError:
+    objc = None
+    AVPlayerView = None
+
 from online_chat import (
     load_chats as load_online_chats,
     load_profiles as load_online_profiles,
@@ -38,6 +54,19 @@ logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG, format="%(asctime)s 
 def log(msg):
     logging.debug(msg)
     print(msg, flush=True)
+
+
+if objc is not None:
+    class MediaOverlayTarget(NSObject):
+        def initWithOwner_(self, owner):
+            self = objc.super(MediaOverlayTarget, self).init()
+            if self is not None:
+                self.owner = owner
+            return self
+
+        @objc.IBAction
+        def close_(self, _sender):
+            self.owner.close_native_media()
 
 
 SERVICE_UUID_STRING = "8F3A1000-7A91-4C91-AF20-000000000001"
@@ -279,6 +308,12 @@ def attachment_kind(filename):
 
 def attachment_icon(filename):
     return {"photo": "▣", "video": "▶", "file": "▤"}[attachment_kind(filename)]
+
+
+def attachment_preview_text(attachment):
+    name = (attachment or {}).get("name") or "Вложение"
+    kind = attachment_kind(name)
+    return "Фото" if kind == "photo" else ("Видео" if kind == "video" else "📎 " + name)
 
 
 def file_size_text(size):
@@ -1367,6 +1402,8 @@ class App:
         self.last_typing_sent = 0
         self.ble_ticks = {}
         self.online_ticks = {}
+        self.online_media_downloads = set()
+        self.native_media = None
         self.online_peer_status = None
         self._chats_save_job = None
         self._list_dirty = False
@@ -1669,6 +1706,7 @@ class App:
                 local_id=item.get("local_id"),
                 scroll=False,
                 attachment=item.get("attachment"),
+                media_path=item.get("media_path") or item.get("file_path"),
             )
         transcript.scroll_to_end()
         self.schedule_read(name)
@@ -1687,7 +1725,8 @@ class App:
         self.online_entry.focus()
         self._list_dirty = True
 
-    def add_online_message(self, transcript, text, outgoing=False, status=None, local_id=None, scroll=True, attachment=None):
+    def add_online_message(self, transcript, text, outgoing=False, status=None, local_id=None, scroll=True,
+                           attachment=None, media_path=None):
         row = tk.Frame(transcript.inner, bg=THEME["chat_bg"])
         row.pack(fill="x", padx=16, pady=4)
         holder = tk.Frame(row, bg=THEME["chat_bg"])
@@ -1695,18 +1734,53 @@ class App:
         bg = THEME["outgoing"] if outgoing else THEME["incoming"]
         fg = THEME["primary_fg"] if outgoing else THEME["text"]
         if attachment:
-            card = tk.Frame(holder, bg=bg, cursor="hand2", padx=12, pady=10)
-            card.pack(fill="x")
-            tk.Label(card, text=attachment_icon(attachment.get("name")), bg=bg, fg=fg,
-                     font=ui_font(22, "bold"), width=2).pack(side="left", padx=(0, 8))
-            details = tk.Frame(card, bg=bg)
-            details.pack(side="left", fill="x", expand=True)
-            tk.Label(details, text=attachment.get("name") or "Вложение", bg=bg, fg=fg,
-                     font=ui_font(13, "bold"), wraplength=310, justify="left").pack(anchor="w")
-            tk.Label(details, text=file_size_text(attachment.get("size")) + " · нажмите, чтобы скачать",
-                     bg=bg, fg=fg, font=ui_font(10)).pack(anchor="w", pady=(3, 0))
-            tk.Label(card, text="↓", bg=bg, fg=fg, font=ui_font(18, "bold")).pack(side="right", padx=(10, 0))
-            bind_click(card, lambda mid=local_id: self.download_online_file(mid))
+            kind = attachment_kind(attachment.get("name"))
+            if kind == "photo":
+                card = tk.Frame(holder, bg=bg, cursor="hand2", padx=5, pady=5)
+                card.pack()
+                shown = False
+                if media_path and os.path.isfile(media_path) and Image is not None and ImageTk is not None:
+                    try:
+                        with Image.open(media_path) as opened:
+                            image = opened.copy()
+                        image.thumbnail((360, 260), Image.Resampling.LANCZOS)
+                        photo = ImageTk.PhotoImage(image)
+                        preview = tk.Label(card, image=photo, bg=bg, borderwidth=0, highlightthickness=0)
+                        preview.image = photo
+                        preview.pack()
+                        shown = True
+                    except Exception as error:
+                        log("media preview: %s" % error)
+                if not shown:
+                    preview = tk.Frame(card, bg=mix_hex(bg, "#000000", 0.20), width=320, height=190)
+                    preview.pack_propagate(False)
+                    preview.pack()
+                    tk.Label(preview, text="Фото", bg=preview["bg"], fg=fg,
+                             font=ui_font(16, "bold")).place(relx=0.5, rely=0.47, anchor="center")
+                    tk.Label(preview, text=file_size_text(attachment.get("size")), bg=preview["bg"],
+                             fg=THEME["subtle"], font=ui_font(10)).place(relx=0.5, rely=0.61, anchor="center")
+                bind_click(card, lambda mid=local_id: self.open_online_media(mid))
+                if not shown and not outgoing and local_id:
+                    self.root.after(80, lambda mid=local_id: self.load_online_media(mid, open_after=False))
+            elif kind == "video":
+                card = tk.Frame(holder, bg="#171A1F", cursor="hand2", width=320, height=180)
+                card.pack_propagate(False)
+                card.pack()
+                tk.Label(card, text="▶", bg="#171A1F", fg="#FFFFFF", font=ui_font(34, "bold")).place(relx=0.5, rely=0.44, anchor="center")
+                tk.Label(card, text="Видео · " + file_size_text(attachment.get("size")), bg="#171A1F",
+                         fg="#D8DADF", font=ui_font(11, "bold")).place(relx=0.5, rely=0.69, anchor="center")
+                bind_click(card, lambda mid=local_id: self.open_online_media(mid))
+            else:
+                card = tk.Frame(holder, bg=bg, cursor="hand2", padx=12, pady=10)
+                card.pack(fill="x")
+                details = tk.Frame(card, bg=bg)
+                details.pack(side="left", fill="x", expand=True)
+                tk.Label(details, text=attachment.get("name") or "Документ", bg=bg, fg=fg,
+                         font=ui_font(13, "bold"), wraplength=310, justify="left").pack(anchor="w")
+                tk.Label(details, text=file_size_text(attachment.get("size")), bg=bg,
+                         fg=THEME["subtle"] if not outgoing else fg, font=ui_font(10)).pack(anchor="w", pady=(3, 0))
+                tk.Label(card, text="↓", bg=bg, fg=fg, font=ui_font(16, "bold")).pack(side="right", padx=(12, 0))
+                bind_click(card, lambda mid=local_id: self.download_online_file(mid))
         else:
             tk.Label(holder, text=text, bg=bg, fg=fg, font=ui_font(13), wraplength=420,
                      justify="left", padx=14, pady=10).pack()
@@ -1739,6 +1813,7 @@ class App:
                 self.online_command_queue.put({
                     "type": "online_send_file" if item.get("file_path") else "online_send", "recipient": self.active_online_chat,
                     "file_path": item.get("file_path"),
+                    "media_kind": attachment_kind((item.get("attachment") or {}).get("name")) if item.get("attachment") else None,
                     "text": item.get("text", ""), "local_id": local_id,
                 })
                 self.schedule_save_chats()
@@ -1817,32 +1892,17 @@ class App:
             self.root.focus_set()
         except Exception:
             pass
-        menu = tk.Frame(self.online, bg=THEME["surface"], highlightbackground=THEME["line"],
-                        highlightthickness=1, padx=8, pady=8)
+        menu = tk.Frame(self.online, bg=THEME["surface"], padx=6, pady=6)
         self.attachment_menu = menu
-        for icon, title, kind in (("▣", "Фото", "photo"), ("▶", "Видео", "video"), ("▤", "Файл", "file")):
-            PillButton(menu, icon + "  " + title,
+        for title, kind in (("Фото", "photo"), ("Видео", "video"), ("Документ", "file")):
+            PillButton(menu, title,
                        command=lambda value=kind: self.choose_online_attachment(value),
-                       variant="secondary", width=154, height=42).pack(fill="x", pady=4)
+                       variant="ghost", width=154, height=40).pack(fill="x", pady=2)
         menu.place(x=16, rely=1.0, y=-22, anchor="sw")
         menu.lift()
-        self._animate_attachment_menu(menu, -22, -78, -8)
+        menu.place_configure(y=-78)
         if hasattr(self, "attachment_button"):
             self.attachment_button.set_text("×")
-
-    def _animate_attachment_menu(self, menu, current, target, step, destroy=False):
-        if self.attachment_menu is not menu:
-            return
-        next_value = max(target, current + step) if step < 0 else min(target, current + step)
-        try:
-            menu.place_configure(y=next_value)
-        except Exception:
-            return
-        if next_value != target:
-            self.root.after(14, lambda: self._animate_attachment_menu(menu, next_value, target, step, destroy))
-        elif destroy:
-            menu.destroy()
-            self.attachment_menu = None
 
     def close_online_attachment_menu(self):
         menu = self.attachment_menu
@@ -1850,12 +1910,14 @@ class App:
             return
         if hasattr(self, "attachment_button"):
             self.attachment_button.set_text("📎")
-        self._animate_attachment_menu(menu, -78, -22, 8, destroy=True)
+        menu.destroy()
+        self.attachment_menu = None
 
     def choose_online_attachment(self, kind):
         self.close_online_attachment_menu()
-        prompts = {"photo": "Выберите фотографию до 5 МБ",
-                   "video": "Выберите видео до 5 МБ", "file": "Выберите файл до 5 МБ"}
+        prompts = {"photo": "Выберите фотографию — приложение уменьшит её перед отправкой",
+                   "video": "Выберите видео — приложение сожмёт его перед отправкой",
+                   "file": "Выберите документ до 5 МБ"}
         self.set_status("Выбор вложения", THEME["warning"], prompts.get(kind, prompts["file"]))
         try:
             self.root.update_idletasks()
@@ -1883,8 +1945,11 @@ class App:
             return
         try:
             size = os.path.getsize(path)
-            if not 0 < size <= 5 * 1024 * 1024:
-                raise ValueError("Выберите непустой файл размером до 5 МБ")
+            input_limit = 200 * 1024 * 1024 if kind in ("photo", "video") else 5 * 1024 * 1024
+            if not 0 < size <= input_limit:
+                raise ValueError("Выберите непустой %s размером до %s МБ" %
+                                 ("медиафайл" if kind in ("photo", "video") else "файл",
+                                  200 if kind in ("photo", "video") else 5))
             actual_kind = attachment_kind(path)
             if kind in ("photo", "video") and actual_kind != kind:
                 raise ValueError("Выбранный файл не является %s" % ("фотографией" if kind == "photo" else "видео"))
@@ -1893,14 +1958,15 @@ class App:
             return
         local_id = str(uuid.uuid4())
         attachment = {"name": os.path.basename(path), "size": size}
-        text = "📎 " + attachment["name"]
+        text = attachment_preview_text(attachment)
         item = {"text": text, "attachment": attachment, "file_path": path, "outgoing": True,
                 "status": "sending", "local_id": local_id, "created_at": time.time(), "sort_at": time.time()}
         self.online_chats.setdefault(self.active_online_chat, []).append(item)
         self.schedule_save_chats()
         self.online_command_queue.put({"type": "online_send_file", "recipient": self.active_online_chat,
-                                       "local_id": local_id, "file_path": path})
-        self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id, attachment=attachment)
+                                       "local_id": local_id, "file_path": path, "media_kind": actual_kind})
+        self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id,
+                                attachment=attachment, media_path=path)
         self._list_dirty = True
 
     def download_online_file(self, local_id):
@@ -1920,6 +1986,107 @@ class App:
         self.online_command_queue.put({"type": "online_download_file", "message_id": item["sid"],
                                        "attachment": attachment, "destination": destination})
         self.set_status("Скачивание…", THEME["warning"], "Файл будет сохранён в «Загрузки»")
+
+    def open_online_media(self, local_id):
+        item = self.find_online_item(local_id)
+        if not item or not item.get("attachment"):
+            return
+        path = item.get("media_path") or item.get("file_path")
+        kind = attachment_kind(item["attachment"].get("name"))
+        if path and os.path.isfile(path):
+            if kind == "photo":
+                self.show_photo_overlay(path)
+            else:
+                self.show_video_overlay(path)
+            return
+        self.load_online_media(local_id, open_after=True)
+
+    def load_online_media(self, local_id, open_after=False):
+        item = self.find_online_item(local_id)
+        if not item or not item.get("attachment") or not item.get("sid") or local_id in self.online_media_downloads:
+            return
+        self.online_media_downloads.add(local_id)
+        kind = attachment_kind(item["attachment"].get("name"))
+        extension = os.path.splitext(item["attachment"].get("name") or "media")[1]
+        destination = os.path.join(tempfile.gettempdir(), "offlinechat-%s%s" % (local_id, extension))
+        self.online_command_queue.put({
+            "type": "online_download_file", "message_id": item["sid"], "attachment": item["attachment"],
+            "destination": destination, "success_event": "online_media_ready", "local_id": local_id,
+            "media_kind": kind, "open_after": bool(open_after),
+        })
+        self.set_status("Загрузка медиа", THEME["warning"], item["attachment"].get("name") or "")
+
+    def find_online_item(self, local_id):
+        for history in self.online_chats.values():
+            for item in history:
+                if item.get("local_id") == local_id:
+                    return item
+        return None
+
+    def show_photo_overlay(self, path):
+        if Image is None or ImageTk is None:
+            subprocess.Popen(["open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        self.close_overlay()
+        overlay = tk.Frame(self.root, bg="#090B0E")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.overlay = overlay
+        try:
+            with Image.open(path) as opened:
+                image = opened.copy()
+            image.thumbnail((1000, 680), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+            label = tk.Label(overlay, image=photo, bg="#090B0E", borderwidth=0, highlightthickness=0)
+            label.image = photo
+            label.place(relx=0.5, rely=0.5, anchor="center")
+        except Exception as error:
+            tk.Label(overlay, text="Не удалось открыть фото\n" + str(error), bg="#090B0E", fg="#FFFFFF",
+                     font=ui_font(14), justify="center").place(relx=0.5, rely=0.5, anchor="center")
+        PillButton(overlay, "Закрыть", command=self.close_overlay, variant="secondary", width=110, height=38).place(x=18, y=18)
+
+    def show_video_overlay(self, path):
+        if AVPlayerView is None:
+            subprocess.Popen(["open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        try:
+            self.close_native_media()
+            window = NSApp().keyWindow() or NSApp().mainWindow()
+            content = window.contentView()
+            bounds = content.bounds()
+            overlay = NSView.alloc().initWithFrame_(bounds)
+            overlay.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+            overlay.setWantsLayer_(True)
+            overlay.layer().setBackgroundColor_(NSColor.blackColor().CGColor())
+            player_view = AVPlayerView.alloc().initWithFrame_(bounds)
+            player_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+            player = AVPlayer.playerWithURL_(NSURL.fileURLWithPath_(path))
+            player_view.setPlayer_(player)
+            overlay.addSubview_(player_view)
+            target = MediaOverlayTarget.alloc().initWithOwner_(self)
+            height = float(bounds.size.height)
+            button = NSButton.alloc().initWithFrame_(((16, max(16, height - 48)), (92, 32)))
+            button.setTitle_("Закрыть")
+            button.setTarget_(target)
+            button.setAction_(b"close:")
+            overlay.addSubview_(button)
+            content.addSubview_(overlay)
+            self.native_media = {"overlay": overlay, "player": player, "target": target,
+                                 "button": button, "view": player_view}
+            player.play()
+        except Exception as error:
+            log("video overlay: %s" % error)
+            subprocess.Popen(["open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def close_native_media(self):
+        media = self.native_media
+        self.native_media = None
+        if not media:
+            return
+        try:
+            media["player"].pause()
+            media["overlay"].removeFromSuperview()
+        except Exception:
+            pass
 
     def find_user(self):
         query = valid_username(self.find_entry.get() if hasattr(self, "find_entry") else "")
@@ -2449,7 +2616,7 @@ class App:
         current_status = match.get("status") or "sending"
         status = current_status if ranks.get(current_status, 0) > ranks.get(incoming_status, 0) else incoming_status
         match.update({
-            "text": str(message.get("body") or ("📎 " + message["attachment"]["name"] if message.get("attachment") else match.get("text") or "")),
+            "text": str(message.get("body") or (attachment_preview_text(message["attachment"]) if message.get("attachment") else match.get("text") or "")),
             "attachment": message.get("attachment"),
             "outgoing": sender == self.online_username,
             "status": status,
@@ -2633,6 +2800,7 @@ class App:
                     self.online_transcript, item.get("text", ""), item.get("outgoing", False),
                     status=item.get("status"), local_id=item.get("local_id"),
                     attachment=item.get("attachment"),
+                    media_path=item.get("media_path") or item.get("file_path"),
                 )
             elif not was_new and item.get("outgoing"):
                 self.update_online_tick(item.get("local_id"), item.get("status"))
@@ -2651,7 +2819,25 @@ class App:
                     subprocess.Popen(["open", "-R", saved_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
+        elif kind == "online_media_ready":
+            local_id = event.get("local_id")
+            self.online_media_downloads.discard(local_id)
+            item = self.find_online_item(local_id)
+            path = event.get("path", "")
+            if item and path:
+                item["media_path"] = path
+                self.schedule_save_chats()
+                active = self.active_online_chat
+                if active:
+                    self.active_online_chat = None
+                    self.open_online_chat(active)
+                if event.get("open_after"):
+                    if event.get("media_kind") == "photo":
+                        self.show_photo_overlay(path)
+                    else:
+                        self.show_video_overlay(path)
         elif kind == "online_file_error":
+            self.online_media_downloads.clear()
             self.set_status("Не удалось скачать", THEME["danger"], message)
         elif kind == "online_send_failed":
             recipient = event.get("recipient")
