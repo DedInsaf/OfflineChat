@@ -1,0 +1,1 @@
+"""macOS OfflineChat application package."""
