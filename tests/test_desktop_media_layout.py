@@ -4,13 +4,14 @@ import tempfile
 import time
 import tkinter as tk
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image
 from desktop_chat.photos import PhotoPreview
 from desktop_chat.recording import RecordingButton
 from desktop_chat.shared import THEME, build_palette, DARK_BASE, LIGHT_BASE, luminance
 from desktop_chat.capture_preview import CapturePreview
+from desktop_chat.message_widgets import LinkedMessageText
 import queue
 from types import SimpleNamespace
 
@@ -75,6 +76,35 @@ class DesktopMediaLayoutTests(unittest.TestCase):
         self.assertIsNotNone(preview.photo)
         self.assertTrue(preview.tk.getboolean(preview.tk.call(str(preview.photo), "transparency", "get", 0, 0)))
         self.assertFalse(preview.tk.getboolean(preview.tk.call(str(preview.photo), "transparency", "get", 88, 88)))
+        first = preview.photo
+        feed.frames.put(Image.new("RGB", (176, 176), "blue"))
+        preview.tick()
+        self.assertIs(preview.photo, first)
+
+    def test_first_video_frame_replaces_waiting_indicator(self):
+        feed = SimpleNamespace(frames=queue.Queue(), level=0.0)
+        preview = CapturePreview(self.root, feed, True)
+        preview.pack()
+        self.root.update()
+        self.assertTrue(preview.waiting_drawn)
+        feed.frames.put(Image.new("RGB", (176, 176), "blue"))
+        preview.tick()
+        self.assertIsNotNone(preview.photo)
+
+    def test_text_links_are_clickable_and_not_editable(self):
+        widget = LinkedMessageText(self.root, "Открой https://example.com/test и www.example.org.", THEME["surface"], THEME["text"])
+        widget.pack()
+        self.root.update()
+        self.assertEqual(widget.cget("state"), "disabled")
+        self.assertEqual(len(widget.tag_ranges("link0")), 2)
+        self.assertTrue(widget.tk.call(widget._w, "tag", "bind", "link0", "<Button-1>"))
+        start = widget.tag_ranges("link0")[0]
+        x, y, width, height = widget.bbox(start)
+        with patch("desktop_chat.message_widgets.webbrowser.open") as opened:
+            widget.event_generate("<Motion>", x=x + 2, y=y + 2)
+            widget.event_generate("<Button-1>", x=x + 2, y=y + 2)
+            self.root.update()
+            opened.assert_called_once_with("https://example.com/test")
 
     def test_recording_controls_follow_light_and_dark_theme(self):
         for base in (LIGHT_BASE, DARK_BASE):

@@ -58,6 +58,25 @@ class ServerHTTPTests(unittest.TestCase):
         finally:
             api.close()
 
+    def test_reply_and_forward_metadata_survive_attachment_send(self):
+        from pathlib import Path
+        from online_chat.message_content import encode, decode
+        path = Path(self.directory.name) / "forward.txt"
+        path.write_bytes(b"forwarded data")
+        api = OnlineAPI(self.url)
+        try:
+            alice_token = self.register(api, "alice")
+            bob_token = self.register(api, "bob")
+            reference = {"id": "source-client-id", "sender": "alice", "text": "Original"}
+            body = encode("", reply=reference, forward=reference)
+            sent = api.send_file("alice", "bob", "metadata-file", path, alice_token, text=body)
+            received = api.sync("bob", bob_token, 0)["events"][0]["message"]
+            self.assertEqual(decode(received["body"])["reply"]["id"], "source-client-id")
+            self.assertEqual(decode(received["body"])["forward"]["sender"], "alice")
+            self.assertEqual(api.download_file("bob", bob_token, sent["id"], sent["attachment"]), b"forwarded data")
+        finally:
+            api.close()
+
 
 if __name__ == "__main__":
     unittest.main()

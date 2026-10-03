@@ -4,9 +4,12 @@ from .shared import *
 from .bluetooth import ble_worker
 from .recording import RecordingButton
 from .playback import RecordedMessage
+from .message_actions import OnlineMessageActions
+from .message_widgets import LinkedMessageText, LocationCard
+from online_chat.message_content import decode as decode_content, encode as encode_content, preview as content_preview
 
 
-class App:
+class App(OnlineMessageActions):
     def __init__(self, root, status_queue, command_queue, online_command_queue, ble_thread):
         self.root = root
         self.status_queue = status_queue
@@ -53,6 +56,9 @@ class App:
         self.attachment_menu = None
         self.last_coords = None
         self.online_location_pending_peer = None
+        self.online_reply = None
+        self.online_selected = set()
+        self.online_forward_pending = {}
         init_fonts(root)
         harden_tk(root)
         self.build()
@@ -353,7 +359,7 @@ class App:
             meta.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
             tk.Label(meta, text=title, bg=bg, fg=THEME["text"], font=ui_font(12, "bold"), anchor="w").pack(fill="x")
             history = [item for item in self.online_chats.get(name, []) if not is_control_body(item.get("text"))]
-            preview = history[-1].get("text", "") if history else "Нет сообщений"
+            preview = content_preview(history[-1].get("text", ""), history[-1].get("attachment")) if history else "Нет сообщений"
             unread = sum(1 for item in history if not item.get("outgoing") and item.get("status") != "read")
             subtitle = preview[:25] + (f"   • {unread}" if unread else "")
             tk.Label(meta, text=subtitle, bg=bg, fg=THEME["accent"] if unread else THEME["muted"], font=ui_font(10, "bold" if unread else "normal"), anchor="w").pack(fill="x")
@@ -367,6 +373,8 @@ class App:
             self._list_dirty = True
             return
         self.active_online_chat = name
+        self.online_reply = None
+        self.online_selected.clear()
         self.online_chats.setdefault(name, [])
         if not hasattr(self, "online"):
             return
@@ -406,6 +414,8 @@ class App:
         self.schedule_read(name)
         bar = tk.Frame(self.online, bg=THEME["surface"])
         bar.pack(fill="x")
+        self.online_message_tools = tk.Frame(bar, bg=THEME["surface"])
+        self.online_message_tools.pack(fill="x", pady=2)
         inner = tk.Frame(bar, bg=THEME["surface_alt"], highlightbackground=THEME["line"], highlightthickness=1)
         inner.pack(fill="x", padx=12, pady=10)
         self.attachment_button = ClipButton(inner, command=self.toggle_online_attachment_menu)
@@ -437,6 +447,17 @@ class App:
         holder.pack(anchor="e" if outgoing else "w")
         bg = THEME["outgoing"] if outgoing else THEME["incoming"]
         fg = THEME["primary_fg"] if outgoing else THEME["text"]
+        content = decode_content(text)
+        if content.get("forward"):
+            tk.Label(holder, text="Переслано от @" + content["forward"]["sender"],
+                     bg=bg, fg=fg, font=ui_font(10), anchor="w", padx=10).pack(fill="x")
+        if content.get("reply"):
+            reply = content["reply"]
+            quote_label = tk.Label(holder, text="↩ @" + reply["sender"] + "\n" + reply["text"],
+                                  bg=THEME["surface_alt"], fg=THEME["text"], justify="left", anchor="w",
+                                  wraplength=290, font=ui_font(11), padx=10, pady=6, cursor="hand2")
+            quote_label.pack(fill="x")
+            quote_label.bind("<Button-1>", lambda event, mid=reply["id"]: self.jump_online_message(mid))
         if attachment:
             kind = attachment_kind(attachment.get("name"))
             if kind == "photo":
@@ -488,8 +509,10 @@ class App:
                 tk.Label(card, text="↓", bg=bg, fg=fg, font=ui_font(16, "bold")).pack(side="right", padx=(12, 0))
                 bind_click(card, lambda mid=local_id: self.download_online_file(mid))
         else:
-            tk.Label(holder, text=text, bg=bg, fg=fg, font=ui_font(13), wraplength=420,
-                     justify="left", padx=14, pady=10).pack()
+            if content.get("location"):
+                LocationCard(holder, content["location"], bg, fg).pack()
+            else:
+                LinkedMessageText(holder, content["text"], bg, fg).pack()
         if outgoing:
             mark_color = THEME["danger"] if status == "failed" else (THEME["accent"] if status == "read" else THEME["subtle"])
             mark = tk.Label(holder, text=receipt_mark(status or "sending"), bg=THEME["chat_bg"], fg=mark_color, font=ui_font(10), anchor="e")
@@ -499,6 +522,7 @@ class App:
                 mark.bind("<Button-1>", lambda _event, mid=local_id: self.retry_online_message(mid))
         if scroll:
             transcript.scroll_to_end()
+        if local_id: self.bind_message_actions(row, local_id)
 
     def add_recorded_media_card(self, holder, kind, attachment, local_id):
         card = tk.Frame(holder, bg="#171A1F", cursor="hand2", width=280 if kind == "voice" else 320, height=70 if kind == "voice" else 180)
@@ -584,7 +608,8 @@ class App:
         if not text:
             return
         self.online_entry.delete(0, tk.END)
-        self.queue_online_text(self.active_online_chat, text)
+        self.queue_online_text(self.active_online_chat, encode_content(text, reply=self.online_reply))
+        self.clear_online_reply()
 
     def queue_online_text(self, recipient, text):
         local_id = str(uuid.uuid4())
@@ -671,7 +696,7 @@ class App:
     def send_online_file(self, kind="file"):
         self.choose_online_attachment(kind)
 
-    def queue_online_file(self, path, kind="file", recipient=None):
+    def queue_online_file(self, path, kind="file", recipient=None, body=None):
         recipient = recipient or self.active_online_chat
         if not recipient or not self.online_username:
             return
@@ -692,13 +717,14 @@ class App:
             return
         local_id = str(uuid.uuid4())
         attachment = {"name": os.path.basename(path), "size": size}
-        text = attachment_preview_text(attachment)
+        text = body if body is not None else encode_content("", reply=self.online_reply)
+        if body is None: self.clear_online_reply()
         item = {"text": text, "attachment": attachment, "file_path": path, "outgoing": True,
                 "status": "sending", "local_id": local_id, "created_at": time.time(), "sort_at": time.time()}
         self.online_chats.setdefault(recipient, []).append(item)
         self.schedule_save_chats()
         self.online_command_queue.put({"type": "online_send_file", "recipient": recipient,
-                                       "local_id": local_id, "file_path": path, "media_kind": actual_kind})
+                                       "local_id": local_id, "file_path": path, "media_kind": actual_kind, "text": text})
         if recipient == self.active_online_chat:
             self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id,
                                     attachment=attachment, media_path=path)
@@ -1431,7 +1457,11 @@ class App:
     def handle(self, event):
         kind = event.get("event")
         message = event.get("message", "")
-        if kind in ("ready", "advertising", "central_ready"):
+        if kind == "online_file_error": self.online_forward_pending.pop(event.get("local_id"), None)
+        if kind == "online_forward_ready":
+            pending = self.online_forward_pending.pop(event.get("local_id"), None)
+            if pending: self.queue_online_file(event["path"], recipient=pending[0], body=pending[1])
+        elif kind in ("ready", "advertising", "central_ready"):
             self.set_status("Готово", THEME["success"], message or "Bluetooth работает")
         elif kind == "scanning":
             self.set_status("Поиск", THEME["warning"], message)
@@ -1539,8 +1569,12 @@ class App:
             pending_peer = self.online_location_pending_peer
             self.online_location_pending_peer = None
             if pending_peer and self.last_coords:
-                self.queue_online_text(pending_peer, "📍 Местоположение\nhttps://maps.apple.com/?ll=" + self.last_coords)
-                self.set_status("Местоположение отправлено", THEME["success"], "Ссылка откроется в Картах")
+                from online_chat.message_content import valid_location
+                lat, lon = self.last_coords.split(",")
+                location = valid_location({"latitude": lat, "longitude": lon})
+                if location: self.queue_online_text(pending_peer, encode_content("", location=location, reply=self.online_reply))
+                self.clear_online_reply()
+                self.set_status("Местоположение отправлено", THEME["success"], "Нажмите на мини-карту, чтобы открыть Яндекс Карты")
             elif pending_peer:
                 self.set_status("Геопозиция недоступна", THEME["danger"], message)
         elif kind == "sos_on":
@@ -1616,7 +1650,8 @@ class App:
                 if viewing:
                     self.schedule_read(peer)
                 elif was_new and event.get("source") == "sync":
-                    desktop_notify((self.online_profiles.get(peer) or {}).get("display_name") or "@" + peer, item.get("text", ""))
+                    desktop_notify((self.online_profiles.get(peer) or {}).get("display_name") or "@" + peer,
+                                   content_preview(item.get("text", ""), item.get("attachment")))
             self.schedule_save_chats()
             self._list_dirty = True
         elif kind == "online_file_saved":

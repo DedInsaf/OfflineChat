@@ -136,12 +136,12 @@ class OnlineAPI:
             "attachment": attachment,
         }, timeout=300 if attachment else 8)
 
-    def send_file(self, sender, recipient, client_id, path, token):
+    def send_file(self, sender, recipient, client_id, path, token, text=""):
         with open(path, "rb") as stream:
             data = stream.read(50 * 1024 * 1024 + 1)
         if not 0 < len(data) <= 50 * 1024 * 1024:
             raise OnlineAPIError("Выберите непустой файл размером до 50 МБ")
-        return self.send(sender, recipient, client_id, "", token, {
+        return self.send(sender, recipient, client_id, text, token, {
             "name": Path(path).name, "data_base64": base64.b64encode(data).decode("ascii"),
         })
 

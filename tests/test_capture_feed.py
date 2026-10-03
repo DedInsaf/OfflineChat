@@ -30,6 +30,6 @@ class CaptureFeedTests(unittest.TestCase):
             result = subprocess.run(command, capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
             self.assertGreater(os.path.getsize(path), 1000)
-            self.assertGreaterEqual(len(result.stdout), SIDE * SIDE * 3)
+            self.assertGreaterEqual(len(result.stdout), SIDE * SIDE * 3 * 15)
             self.assertEqual(len(result.stdout) % (SIDE * SIDE * 3), 0)
             self.assertIn(b"lavfi.astats.Overall.RMS_level=", result.stderr)

@@ -118,6 +118,7 @@ struct OnlineMessageBubble: View {
     let download: (Bool) async -> URL?
     let onOpenMedia: (URL) -> Void
     let onOpenFile: (URL) -> Void
+    var onOpenReply: (String) -> Void = { _ in }
     @State private var mediaURL: URL?
     @State private var loading = false
 
@@ -125,12 +126,30 @@ struct OnlineMessageBubble: View {
         HStack(alignment: .bottom) {
             if outgoing { Spacer(minLength: message.attachment?.kind == "circle" ? 8 : 24) }
             VStack(alignment: .leading, spacing: 3) {
+                if let forwarded = message.content.forward {
+                    Text("Переслано от @" + forwarded.sender).font(.caption).foregroundStyle(Color.ocMuted)
+                }
+                if let reply = message.content.reply {
+                    Button { onOpenReply(reply.id) } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("↩ @" + reply.sender).font(.caption.weight(.semibold))
+                            Text(reply.text).font(.caption).lineLimit(2)
+                        }
+                        .foregroundStyle(Color.ocText)
+                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.ocSurfaceAlt, in: RoundedRectangle(cornerRadius: 8))
+                    }.buttonStyle(.plain)
+                }
                 if let attachment = message.attachment {
                     attachmentContent(attachment)
                 } else {
-                    Text(message.text)
+                    if let location = message.content.location {
+                        OnlineLocationCard(location: location)
+                    } else {
+                    OnlineLinkedText(text: message.content.text)
                         .font(.system(size: 16))
                         .foregroundColor(outgoing ? .ocPrimaryFg : .ocText)
+                    }
                 }
                 HStack(spacing: 4) {
                     Spacer(minLength: 0)
@@ -144,7 +163,9 @@ struct OnlineMessageBubble: View {
             .padding(.vertical, 7)
             .background(message.attachment?.kind == "circle" ? Color.clear : (outgoing ? Color.ocOutgoing : Color.ocIncoming))
             .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
-            .onTapGesture { if message.status == .failed { onRetry() } }
+            .overlay(alignment: .bottomTrailing) {
+                if message.status == .failed { Button("Повторить", action: onRetry).font(.caption).offset(y: 16) }
+            }
             if !outgoing { Spacer(minLength: message.attachment?.kind == "circle" ? 8 : 24) }
         }
         .task(id: message.serverID) {

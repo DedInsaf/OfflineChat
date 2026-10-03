@@ -117,6 +117,11 @@ struct OnlineChatView: View {
     @State private var recordingLocked = false
     @State private var recordingCancelled = false
     @State private var recordedDraft: URL?
+    @State private var replyTo: OnlineMessage?
+    @State private var selecting = false
+    @State private var selectedIDs: Set<UUID> = []
+    @State private var forwarding: [OnlineMessage] = []
+    @State private var showForwardPicker = false
 
     private var profile: OnlineProfile? { store.profiles[peer] }
     private var items: [OnlineMessage] { store.messages[peer] ?? [] }
@@ -138,8 +143,30 @@ struct OnlineChatView: View {
                                     onOpenMedia: { url in
                                         previewedMedia = PreviewedOnlineMedia(url: url, kind: message.attachment?.kind ?? "file")
                                     },
-                                    onOpenFile: { url in downloadedFile = DownloadedOnlineFile(url: url) }
+                                    onOpenFile: { url in downloadedFile = DownloadedOnlineFile(url: url) },
+                                    onOpenReply: { id in
+                                        if let target = items.first(where: { $0.id.uuidString.lowercased() == id.lowercased() }) {
+                                            withAnimation { proxy.scrollTo(target.id, anchor: .center) }
+                                        }
+                                    }
                                 )
+                                .overlay {
+                                    if selecting {
+                                        RoundedRectangle(cornerRadius: 14).fill(selectedIDs.contains(message.id) ? Color.ocPrimary.opacity(0.14) : Color.clear)
+                                            .contentShape(Rectangle())
+                                            .onTapGesture { toggleSelection(message) }
+                                    }
+                                }
+                                .contextMenu {
+                                    Button { UIPasteboard.general.string = message.copyText } label: { Label("Скопировать", systemImage: "doc.on.doc") }
+                                    Button { beginForwarding([message]) } label: { Label("Переслать", systemImage: "arrowshape.turn.up.right") }
+                                    Button { selecting = true; selectedIDs.insert(message.id) } label: { Label("Выбрать", systemImage: "checkmark.circle") }
+                                    Button { replyTo = message; composerFocused = true } label: { Label("Ответить", systemImage: "arrowshape.turn.up.left") }
+                                    if let location = message.content.location {
+                                        Button("Яндекс Карты") { openYandexLocation(location) }
+                                        Link("2ГИС", destination: location.twoGISURL)
+                                    }
+                                }
                                 .id(message.id)
                             }
                             if store.typingPeers.contains(peer) {
@@ -159,9 +186,11 @@ struct OnlineChatView: View {
                         .padding(.vertical, 12)
                     }
                     .scrollDismissesKeyboard(.interactively)
-                    .onTapGesture { closeAttachmentMenu() }
+                    .simultaneousGesture(TapGesture().onEnded { closeAttachmentMenu() })
                     .onAppear { scrollToBottom(proxy, animated: false) }
-                    .onChange(of: items) { _, _ in scrollToBottom(proxy, animated: true) }
+                    .onChange(of: items) { old, new in
+                        if !selecting && old.last?.id != new.last?.id { scrollToBottom(proxy, animated: true) }
+                    }
                 }
                 if store.preparingFile || loadingMedia {
                     HStack(spacing: 9) {
@@ -188,6 +217,13 @@ struct OnlineChatView: View {
         .background(Color.ocChatBg)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if selecting {
+                    Button { UIPasteboard.general.string = selectedItems.map(\.copyText).joined(separator: "\n") } label: { Image(systemName: "doc.on.doc") }.disabled(selectedIDs.isEmpty)
+                    Button { beginForwarding(selectedItems) } label: { Image(systemName: "arrowshape.turn.up.right") }.disabled(selectedIDs.isEmpty)
+                    Button("Готово") { selecting = false; selectedIDs.removeAll() }
+                }
+            }
             ToolbarItem(placement: .principal) {
                 Button { showProfile = true } label: {
                     HStack(spacing: 9) {
@@ -208,12 +244,21 @@ struct OnlineChatView: View {
         .sheet(isPresented: $showProfile) {
             OnlineProfileView(profile: profile, fallbackUsername: peer)
         }
+        .sheet(isPresented: $showForwardPicker) {
+            OnlineForwardPicker(store: store) { recipient in
+                let messages = forwarding
+                forwarding = []
+                selecting = false
+                selectedIDs.removeAll()
+                Task { await store.forward(messages, to: recipient) }
+            }
+        }
         .onAppear { store.openedChat(with: peer) }
         .onDisappear { store.closedChat(with: peer) }
         .fileImporter(isPresented: $showFilePicker,
                       allowedContentTypes: filePickerKind == .audio ? [.audio] : [.item]) { result in
             switch result {
-            case .success(let url): store.sendPickedFile(url, to: peer)
+            case .success(let url): store.sendPickedFile(url, to: peer, body: attachmentBody())
             case .failure(let error): store.fileError = error.localizedDescription
             }
         }
@@ -247,6 +292,16 @@ struct OnlineChatView: View {
 
     private var composer: some View {
         VStack {
+            if let replyTo {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Ответ @" + replyTo.sender).font(.caption.weight(.semibold))
+                        Text(replyTo.previewText).font(.caption).lineLimit(2)
+                    }.foregroundStyle(Color.ocText)
+                    Spacer()
+                    Button { self.replyTo = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Color.ocMuted) }
+                }.padding(10).background(Color.ocSurfaceAlt)
+            }
             if recorder.recording {
                 if videoRecording { RecordingPreview(session: recorder.session).frame(width: 180, height: 180).clipShape(Circle()) }
                 HStack {
@@ -265,7 +320,7 @@ struct OnlineChatView: View {
                 RecordedMessageView(url: recordedDraft, circle: videoRecording)
                 HStack {
                     Button("Удалить", role: .destructive) { try? FileManager.default.removeItem(at: recordedDraft); self.recordedDraft = nil }
-                    Button("Отправить") { store.sendPickedFile(recordedDraft, to: peer); self.recordedDraft = nil }
+                    Button("Отправить") { store.sendPickedFile(recordedDraft, to: peer, body: attachmentBody()); self.recordedDraft = nil }
                 }
             }
         HStack(alignment: .bottom, spacing: 8) {
@@ -304,7 +359,7 @@ struct OnlineChatView: View {
                             recorder.start(video: videoRecording) { url in
                                 guard let url else { return }
                                 if recordingLocked { recordedDraft = url; recordingLocked = false }
-                                else { store.sendPickedFile(url, to: peer) }
+                                else { store.sendPickedFile(url, to: peer, body: attachmentBody()) }
                             }
                         }
                         recordJob = job
@@ -317,7 +372,7 @@ struct OnlineChatView: View {
                                 recorder.start(video: videoRecording) { url in
                                     guard let url else { return }
                                     if recordingLocked { recordedDraft = url; recordingLocked = false }
-                                    else { store.sendPickedFile(url, to: peer) }
+                                    else { store.sendPickedFile(url, to: peer, body: attachmentBody()) }
                                 }
                             }
                         }
@@ -329,8 +384,9 @@ struct OnlineChatView: View {
                     .disabled(store.preparingFile || recordingLocked || recordedDraft != nil)
             } else {
             Button {
-                let value = draft
+                let value = OnlineMessageContent(text: draft, reply: replyTo.map(OnlineQuote.init)).encoded
                 draft = ""
+                replyTo = nil
                 Task { await store.send(value, to: peer) }
             } label: {
                 Image(systemName: "arrow.up")
@@ -397,13 +453,13 @@ struct OnlineChatView: View {
                         if prepared.url != movie.url { try? FileManager.default.removeItem(at: prepared.url) }
                     }
                     let data = try await Task.detached(priority: .utility) { try OnlineFiles.read(prepared.url) }.value
-                    await store.sendPickedMedia(data, name: prepared.name, to: peer)
+                    await store.sendPickedMedia(data, name: prepared.name, to: peer, body: attachmentBody())
                 } else {
                     guard let data = try await item.loadTransferable(type: Data.self) else {
                         throw OnlineFiles.failure("Не удалось прочитать выбранную фотографию")
                     }
                     let prepared = try await OnlineMediaPreparation.photo(data)
-                    await store.sendPickedMedia(prepared.data, name: prepared.name, to: peer)
+                    await store.sendPickedMedia(prepared.data, name: prepared.name, to: peer, body: attachmentBody())
                 }
             } catch {
                 store.fileError = error.localizedDescription
@@ -432,9 +488,10 @@ struct OnlineChatView: View {
             locationProvider.requestLocation { result in
                 switch result {
                 case .success(let coordinate):
-                    let latitude = String(format: "%.6f", coordinate.latitude)
-                    let longitude = String(format: "%.6f", coordinate.longitude)
-                    Task { await store.send("📍 Местоположение\nhttps://maps.apple.com/?ll=\(latitude),\(longitude)", to: peer) }
+                    let body = OnlineMessageContent(text: "", reply: replyTo.map(OnlineQuote.init),
+                        location: OnlineLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)).encoded
+                    replyTo = nil
+                    Task { await store.send(body, to: peer) }
                 case .failure(let error):
                     store.fileError = error.localizedDescription
                 }
@@ -457,7 +514,7 @@ struct OnlineChatView: View {
             defer { loadingMedia = false }
             do {
                 let prepared = try await OnlineMediaPreparation.photo(data)
-                await store.sendPickedMedia(prepared.data, name: prepared.name, to: peer)
+                await store.sendPickedMedia(prepared.data, name: prepared.name, to: peer, body: attachmentBody())
             } catch {
                 store.fileError = error.localizedDescription
             }
@@ -468,6 +525,21 @@ struct OnlineChatView: View {
         guard let last = items.last else { return }
         let action = { proxy.scrollTo(last.id, anchor: .bottom) }
         if animated { withAnimation(.easeOut(duration: 0.2), action) } else { action() }
+    }
+
+    private var selectedItems: [OnlineMessage] { items.filter { selectedIDs.contains($0.id) } }
+    private func toggleSelection(_ message: OnlineMessage) {
+        if selectedIDs.contains(message.id) { selectedIDs.remove(message.id) }
+        else { selectedIDs.insert(message.id) }
+    }
+    private func beginForwarding(_ messages: [OnlineMessage]) {
+        forwarding = messages
+        showForwardPicker = true
+    }
+    private func attachmentBody() -> String {
+        let body = OnlineMessageContent(text: "", reply: replyTo.map(OnlineQuote.init)).encoded
+        replyTo = nil
+        return body
     }
 }
 

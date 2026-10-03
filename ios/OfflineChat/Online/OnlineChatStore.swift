@@ -334,7 +334,8 @@ final class OnlineChatStore: ObservableObject {
 
     func send(_ rawText: String, to recipient: String) async {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.count <= 2_000, !username.isEmpty else { return }
+        guard !text.isEmpty, !username.isEmpty else { return }
+        guard text.count <= 4_000 else { fileError = "Сообщение слишком длинное (до 4000 символов с цитатой)"; return }
         let message = OnlineMessage(
             clientID: UUID(),
             serverID: nil,
@@ -360,7 +361,7 @@ final class OnlineChatStore: ObservableObject {
 
     /// Must be called directly from fileImporter: security-scoped access has
     /// to start before the system picker finishes handing the URL to us.
-    func sendPickedFile(_ url: URL, to recipient: String) {
+    func sendPickedFile(_ url: URL, to recipient: String, body: String = "") {
         guard !username.isEmpty, !preparingFile else { return }
         preparingFile = true
         fileError = ""
@@ -370,15 +371,15 @@ final class OnlineChatStore: ObservableObject {
             defer {
                 if hasSecurityAccess { url.stopAccessingSecurityScopedResource() }
             }
-            await self?.prepareAndSendFile(url, to: recipient, id: id)
+            await self?.prepareAndSendFile(url, to: recipient, id: id, body: body)
         }
     }
 
-    private func prepareAndSendFile(_ url: URL, to recipient: String, id: UUID) async {
+    private func prepareAndSendFile(_ url: URL, to recipient: String, id: UUID, body: String) async {
         do {
             let attachment = try await OnlineFiles.stage(url, id: id)
             let message = OnlineMessage(clientID: id, sender: username, recipient: recipient,
-                                        text: "", createdAt: Date(), status: .sending, attachment: attachment)
+                                        text: body, createdAt: Date(), status: .sending, attachment: attachment)
             remember(peer: recipient)
             upsert(message)
             persist()
@@ -391,7 +392,7 @@ final class OnlineChatStore: ObservableObject {
         }
     }
 
-    func sendPickedMedia(_ data: Data, name: String, to recipient: String) async {
+    func sendPickedMedia(_ data: Data, name: String, to recipient: String, body: String = "") async {
         guard !username.isEmpty, !preparingFile else { return }
         preparingFile = true
         fileError = ""
@@ -399,7 +400,7 @@ final class OnlineChatStore: ObservableObject {
         do {
             let attachment = try await OnlineFiles.stage(data, name: name, id: id)
             let message = OnlineMessage(clientID: id, sender: username, recipient: recipient,
-                                        text: "", createdAt: Date(), status: .sending, attachment: attachment)
+                                        text: body, createdAt: Date(), status: .sending, attachment: attachment)
             remember(peer: recipient)
             upsert(message)
             persist()
@@ -409,6 +410,20 @@ final class OnlineChatStore: ObservableObject {
             preparingFile = false
             fileError = error.localizedDescription
             await OnlineFiles.removeStaged(id)
+        }
+    }
+
+    func forward(_ items: [OnlineMessage], to recipient: String) async {
+        for item in items {
+            let body = OnlineMessageContent(text: item.attachment == nil ? item.content.text : "",
+                                            forward: OnlineQuote(item), location: item.content.location).encoded
+            if let attachment = item.attachment {
+                guard let url = await downloadFile(item) else { return }
+                do {
+                    let data = try await Task.detached(priority: .utility) { try OnlineFiles.read(url) }.value
+                    await sendPickedMedia(data, name: attachment.name, to: recipient, body: body)
+                } catch { fileError = error.localizedDescription; return }
+            } else { await send(body, to: recipient) }
         }
     }
 

@@ -26,6 +26,8 @@ a = Analysis(
         'AppKit',
         'AVKit',
         'AVFoundation',
+        'MapKit',
+        'CoreLocation',
     ],
     hookspath=[],
     hooksconfig={},

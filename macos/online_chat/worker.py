@@ -55,7 +55,7 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
             if command["type"] == "online_send_file":
                 staged = stage(command["file_path"], command["local_id"], media_kind=command.get("media_kind"))
                 message = file_api.send_file(current_username, command["recipient"],
-                                            command["local_id"], staged, token)
+                                            command["local_id"], staged, token, text=command.get("text", ""))
                 emit("online_message_sync", message=message, source="send")
                 discard(staged)
             else:
@@ -77,7 +77,7 @@ def online_worker(status_queue, command_queue, display_name, server_url, api_key
             if command["type"] == "online_send_file":
                 emit("online_send_failed", recipient=command["recipient"], local_id=command["local_id"], message=_error_text(exc))
             else:
-                emit("online_file_error", message=_error_text(exc))
+                emit("online_file_error", message=_error_text(exc), local_id=command.get("local_id"))
         finally:
             file_api.close()
 

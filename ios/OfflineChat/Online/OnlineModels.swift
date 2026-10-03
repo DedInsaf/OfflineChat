@@ -51,7 +51,8 @@ struct OnlineMessage: Codable, Equatable, Identifiable {
     var attachment: OnlineAttachment? = nil
 
     var previewText: String {
-        guard let attachment else { return text }
+        if content.location != nil { return "📍 Местоположение" }
+        guard let attachment else { return content.text }
         switch attachment.kind {
         case "photo": return "Фото"
         case "video": return "Видео"

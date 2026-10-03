@@ -11,6 +11,22 @@ import Testing
 
 struct OfflineChatTests {
 
+    @Test func structuredRepliesAndLocationsRoundtrip() {
+        let message = OnlineMessage(clientID: UUID(), sender: "anna", recipient: "boris", text: "Фото",
+                                    createdAt: Date(), status: .sent)
+        let body = OnlineMessageContent(text: "Ответ", reply: OnlineQuote(message),
+                                       location: OnlineLocation(latitude: 55.75, longitude: 37.61))
+        #expect(OnlineMessageContent.decode(body.encoded) == body)
+        #expect(body.reply?.id == message.id.uuidString.lowercased())
+        #expect(body.location?.yandexURL.host == "yandex.ru")
+    }
+
+    @Test func legacyLocationsBecomeCards() {
+        let body = OnlineMessageContent.decode("📍 Местоположение\nhttps://maps.apple.com/?ll=55.75,37.61")
+        #expect(body.location?.latitude == 55.75)
+        #expect(body.location?.longitude == 37.61)
+    }
+
     @Test func usernameNormalization() {
         #expect(UsernameRules.normalized("  @Anna_K-42  ") == "anna_k42")
         #expect(UsernameRules.validate("@anna_42") == "anna_42")
