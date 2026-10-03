@@ -266,7 +266,7 @@ final class OnlineAPI {
             url.appendPathComponent(String(component))
         }
         var request = URLRequest(url: url)
-        request.timeoutInterval = endpoint == "messages/send" || endpoint == "files/download" ? 150 : 35
+        request.timeoutInterval = endpoint == "messages/send" || endpoint == "files/download" ? 300 : 35
         request.httpMethod = "POST"
         request.httpBody = try encoder.encode(body)
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")

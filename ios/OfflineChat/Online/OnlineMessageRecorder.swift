@@ -5,6 +5,7 @@ import AVFoundation
 final class OnlineMessageRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
     @Published var recording = false
     @Published var error = ""
+    @Published var finishing = false
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "chat.recording")
     private let output = AVCaptureMovieFileOutput()
@@ -12,14 +13,24 @@ final class OnlineMessageRecorder: NSObject, ObservableObject, AVCaptureFileOutp
     private var held = false
     private var completion: ((URL?) -> Void)?
     private var url: URL?
+    private var startedAt: Date?
+    private var generation = UUID()
+    var durationText: String {
+        let seconds = min(60, Int(Date().timeIntervalSince(startedAt ?? Date())))
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
 
     @MainActor func start(video: Bool, completion: @escaping (URL?) -> Void) {
+        guard !held && !recording && !finishing else { return }
+        RecordedPlayback.stopActive()
+        let currentGeneration = UUID()
+        generation = currentGeneration
         held = true
         self.completion = completion
         Task {
             let microphone = await AVCaptureDevice.requestAccess(for: .audio)
             let camera = video ? await AVCaptureDevice.requestAccess(for: .video) : true
-            guard held else { return }
+            guard held && generation == currentGeneration else { return }
             guard microphone && camera else {
                 error = "Разрешите микрофон и камеру в настройках iPhone."
                 held = false
@@ -32,6 +43,7 @@ final class OnlineMessageRecorder: NSObject, ObservableObject, AVCaptureFileOutp
                 let path = FileManager.default.temporaryDirectory.appendingPathComponent("oc-\(video ? "circle" : "voice")-\(UUID().uuidString).\(video ? "mov" : "m4a")")
                 url = path
                 recording = true
+                startedAt = Date()
                 if video {
                     queue.async { [self] in
                         session.beginConfiguration()
@@ -65,6 +77,9 @@ final class OnlineMessageRecorder: NSObject, ObservableObject, AVCaptureFileOutp
                 } else {
                     audio = try AVAudioRecorder(url: path, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 24000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 48000])
                     guard audio?.record(forDuration: 60) == true else { throw NSError(domain: "Recording", code: 3) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+                        if self?.generation == currentGeneration && self?.recording == true { self?.finish() }
+                    }
                 }
             } catch { self.error = error.localizedDescription; cancel() }
         }
@@ -72,7 +87,7 @@ final class OnlineMessageRecorder: NSObject, ObservableObject, AVCaptureFileOutp
 
     @MainActor func finish() {
         held = false
-        if output.isRecording { output.stopRecording(); return }
+        if output.isRecording { finishing = true; output.stopRecording(); return }
         guard let audio else { return }
         let duration = audio.currentTime
         audio.stop()
@@ -81,15 +96,17 @@ final class OnlineMessageRecorder: NSObject, ObservableObject, AVCaptureFileOutp
     }
 
     @MainActor func cancel() {
+        generation = UUID()
         held = false
         completion = nil
-        if output.isRecording { output.stopRecording() }
+        if output.isRecording { finishing = true; output.stopRecording(); return }
         audio?.stop(); audio = nil
         deliver(nil)
     }
 
     private func deliver(_ result: URL?) {
         recording = false
+        finishing = false
         queue.async { if self.session.isRunning { self.session.stopRunning() } }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         completion?(result)
@@ -100,7 +117,7 @@ final class OnlineMessageRecorder: NSObject, ObservableObject, AVCaptureFileOutp
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
         DispatchQueue.main.async {
             let succeeded = error == nil || (error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool == true
-            self.deliver(succeeded ? outputFileURL : nil)
+            self.deliver(succeeded && self.completion != nil ? outputFileURL : nil)
         }
     }
 }

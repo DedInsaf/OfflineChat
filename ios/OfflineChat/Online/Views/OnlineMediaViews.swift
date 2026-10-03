@@ -321,7 +321,7 @@ enum OnlineMediaPreparation {
                 encoded = image.jpegData(compressionQuality: quality)
             }
             guard let encoded, !encoded.isEmpty, encoded.count <= OnlineFiles.limit else {
-                throw OnlineFiles.failure("Фотографию не удалось уменьшить до 5 МБ")
+                throw OnlineFiles.failure("Фотографию не удалось уменьшить до 50 МБ")
             }
             return Photo(data: encoded, name: "Фото-\(Int(Date().timeIntervalSince1970)).jpg")
         }.value
@@ -349,7 +349,7 @@ enum OnlineMediaPreparation {
         if size > 0, size <= OnlineFiles.limit {
             return Video(url: source, name: "Видео-\(Int(Date().timeIntervalSince1970)).mov")
         }
-        throw OnlineFiles.failure("Видео слишком длинное. После сжатия оно всё ещё больше 5 МБ")
+        throw OnlineFiles.failure("Видео слишком длинное. После сжатия оно всё ещё больше 50 МБ")
     }
 }
 

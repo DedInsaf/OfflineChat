@@ -20,6 +20,14 @@ class RecordingButton(tk.Button):
         self.process = None
         self.started = None
         self.path = None
+        self.locked = False
+        self.cancelled = False
+        self.origin = (0, 0)
+        self.draft = None
+        self.actions = None
+        self.preview = None
+        self.generation = 0
+        self.finalizing = False
         self.icons = {}
         try:
             from AppKit import NSImage
@@ -36,6 +44,7 @@ class RecordingButton(tk.Button):
         self.after(100, self.poll)
         self.bind("<ButtonPress-1>", self.press)
         self.bind("<ButtonRelease-1>", self.release)
+        self.bind("<B1-Motion>", self.drag)
         self.bind("<Escape>", self.cancel)
         self.bind("<Destroy>", lambda event: self.cancel() if event.widget is self else None)
 
@@ -46,18 +55,66 @@ class RecordingButton(tk.Button):
     def poll(self):
         try:
             while True:
-                path = self.results.get_nowait()
-                if path: self.send(path)
+                path, review, generation = self.results.get_nowait()
+                if generation != self.generation:
+                    if path and os.path.isfile(path): os.unlink(path)
+                    continue
+                self.show_mode()
+                if path and review:
+                    self.draft = path
+                    self.show_actions(review=True)
+                elif path: self.send(path)
                 else: self.report("Запись не получилась. Проверьте разрешения микрофона и камеры в настройках macOS.")
         except queue.Empty:
             pass
         self.after(100, self.poll)
 
     def press(self, _event):
+        if self.locked or self.draft or self.finalizing: return
+        self.cancelled = False
+        self.origin = (_event.x_root, _event.y_root)
         self.focus_set()
         self.job = self.after(250, self.start)
 
+    def drag(self, event):
+        dx, dy = event.x_root - self.origin[0], event.y_root - self.origin[1]
+        if dx < -80 and not self.locked:
+            self.cancelled = True
+            self.cancel()
+        elif dy < -65 and not self.cancelled:
+            self.locked = True
+            self.show_actions()
+
+    def show_actions(self, review=False):
+        if self.actions: self.actions.destroy()
+        self.actions = tk.Frame(self.master, bg=self.cget("bg"))
+        self.actions.pack(side="right")
+        tk.Button(self.actions, text="Удалить" if review else "Отмена", command=self.cancel).pack(side="left")
+        if review:
+            from .playback import RecordedMessage
+            if self.preview: self.preview.destroy()
+            self.preview = RecordedMessage(self.master, self.draft, circle=self.video)
+            self.preview.pack(side="left")
+            tk.Button(self.actions, text="Отправить", command=self.send_draft).pack(side="left")
+        else:
+            tk.Button(self.actions, text="Прослушать", command=lambda: self.finish(review=True)).pack(side="left")
+            tk.Button(self.actions, text="Отправить", command=self.finish).pack(side="left")
+
+    def send_draft(self):
+        path, self.draft = self.draft, None
+        self.clear_actions()
+        self.send(path)
+
+    def clear_actions(self):
+        if self.actions: self.actions.destroy(); self.actions = None
+        if self.preview: self.preview.destroy(); self.preview = None
+        self.locked = False
+
     def start(self):
+        self.generation += 1
+        from .playback import RecordedMessage
+        active = RecordedMessage.active() if RecordedMessage.active else None
+        if active is not None and active.playing: active.toggle()
         self.job = None
         executable = shutil.which("ffmpeg") or ("/opt/homebrew/bin/ffmpeg" if os.path.isfile("/opt/homebrew/bin/ffmpeg") else None)
         if not executable:
@@ -77,6 +134,8 @@ class RecordingButton(tk.Button):
         self.after(61000, lambda: self.finish() if self.process is process else None)
 
     def release(self, _event):
+        if self.cancelled: self.cancelled = False; return
+        if self.locked: return
         if self.job:
             self.after_cancel(self.job)
             self.job = None
@@ -86,13 +145,21 @@ class RecordingButton(tk.Button):
             self.finish()
 
     def cancel(self, _event=None):
+        self.generation += 1
+        if self.job: self.after_cancel(self.job); self.job = None
+        if self.draft and os.path.isfile(self.draft): os.unlink(self.draft)
+        self.draft = None
+        self.clear_actions()
         self.finish(cancel=True)
 
-    def finish(self, cancel=False):
+    def finish(self, cancel=False, review=False):
         if not self.process:
             return
         process, path = self.process, self.path
+        generation = self.generation
         self.process = None
+        self.finalizing = True
+        self.clear_actions()
         duration = time.monotonic() - self.started
         if self.winfo_exists():
             self.show_mode()
@@ -102,9 +169,11 @@ class RecordingButton(tk.Button):
             except subprocess.TimeoutExpired:
                 process.kill(); process.wait()
             valid = not cancel and duration >= 0.5 and os.path.isfile(path) and os.path.getsize(path) > 1000
+            valid = valid and generation == self.generation
+            self.finalizing = False
             if valid:
-                self.results.put(path)
+                self.results.put((path, review, generation))
             else:
                 if os.path.isfile(path): os.unlink(path)
-                if not cancel: self.results.put(None)
+                if not cancel and generation == self.generation: self.results.put((None, False, generation))
         threading.Thread(target=finalize, daemon=True).start()

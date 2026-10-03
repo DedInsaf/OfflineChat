@@ -3,10 +3,12 @@ import AVFoundation
 
 @MainActor
 final class RecordedPlayback: ObservableObject {
+    private static weak var active: RecordedPlayback?
     @Published var playing = false
     @Published var elapsed: Double = 0
     @Published var duration: Double = 0
     @Published var waveform: [Float] = []
+    @Published var speed: Float = 1
     let player: AVPlayer
     private var observer: Any?
     init(url: URL) {
@@ -38,16 +40,26 @@ final class RecordedPlayback: ObservableObject {
         }
     }
     func toggle() {
+        if Self.active !== self { Self.active?.stop(); Self.active = self }
         if playing { player.pause() }
         else {
             try? AVAudioSession.sharedInstance().setCategory(.playback)
             try? AVAudioSession.sharedInstance().setActive(true)
             if duration > 0 && elapsed >= duration - 0.1 { player.seek(to: .zero) }
             player.play()
+            player.rate = speed
         }
         playing.toggle()
     }
     func stop() { player.pause(); playing = false }
+    static func stopActive() { active?.stop() }
+    func seek(fraction: Double) {
+        player.seek(to: CMTime(seconds: max(0, min(1, fraction)) * duration, preferredTimescale: 600))
+    }
+    func changeSpeed() {
+        speed = speed == 1 ? 1.5 : (speed == 1.5 ? 2 : 1)
+        if playing { player.rate = speed }
+    }
     deinit { if let observer { player.removeTimeObserver(observer) } }
 }
 
@@ -109,7 +121,15 @@ struct RecordedMessageView: View {
                                 context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(Double(index) / 48 < playback.elapsed / max(playback.duration, 1) ? .purple : Color.ocMuted))
                             }
                         }.frame(height: 25)
-                        Text(time).font(.system(size: 14).monospacedDigit()).foregroundStyle(Color.ocMuted)
+                        .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
+                            playback.seek(fraction: gesture.location.x / 183)
+                        })
+                        HStack {
+                            Text(time).font(.system(size: 14).monospacedDigit()).foregroundStyle(Color.ocMuted)
+                            Spacer()
+                            Button(String(format: "%g×", playback.speed)) { playback.changeSpeed() }
+                                .font(.caption.bold()).buttonStyle(.plain)
+                        }
                     }
                 }.frame(width: 245).padding(.vertical, 5)
             }

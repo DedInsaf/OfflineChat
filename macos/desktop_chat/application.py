@@ -371,6 +371,7 @@ class App:
         if not hasattr(self, "online"):
             return
         self.attachment_menu = None
+        self.online_media_rows = {}
         for child in self.online.winfo_children():
             child.destroy()
         head = tk.Frame(self.online, bg=THEME["surface"], highlightbackground=THEME["line"], highlightthickness=1)
@@ -422,9 +423,15 @@ class App:
         self._list_dirty = True
 
     def add_online_message(self, transcript, text, outgoing=False, status=None, local_id=None, scroll=True,
-                           attachment=None, media_path=None):
-        row = tk.Frame(transcript.inner, bg=THEME["chat_bg"])
-        row.pack(fill="x", padx=16, pady=4)
+                           attachment=None, media_path=None, reuse_row=None):
+        row = reuse_row or tk.Frame(transcript.inner, bg=THEME["chat_bg"])
+        if reuse_row:
+            for child in row.winfo_children(): child.destroy()
+        else:
+            row.pack(fill="x", padx=16, pady=4)
+        if local_id:
+            if not hasattr(self, "online_media_rows"): self.online_media_rows = {}
+            self.online_media_rows[local_id] = row
         holder = tk.Frame(row, bg=THEME["chat_bg"])
         holder.pack(anchor="e" if outgoing else "w")
         bg = THEME["outgoing"] if outgoing else THEME["incoming"]
@@ -645,8 +652,8 @@ class App:
             self.set_status("Определяем местоположение", THEME["warning"], "Подождите несколько секунд")
             return
         prompts = {"media": "Выберите фотографию или видео — приложение оптимизирует его перед отправкой",
-                   "audio": "Выберите аудиофайл до 5 МБ",
-                   "file": "Выберите файл до 5 МБ"}
+                   "audio": "Выберите аудиофайл до 50 МБ",
+                   "file": "Выберите файл до 50 МБ"}
         self.set_status("Выбор вложения", THEME["warning"], prompts.get(kind, prompts["file"]))
         try:
             self.root.update_idletasks()
@@ -675,11 +682,11 @@ class App:
             return
         try:
             size = os.path.getsize(path)
-            input_limit = 200 * 1024 * 1024 if kind == "media" else 5 * 1024 * 1024
+            input_limit = 200 * 1024 * 1024 if kind == "media" else 50 * 1024 * 1024
             if not 0 < size <= input_limit:
                 raise ValueError("Выберите непустой %s размером до %s МБ" %
                                  ("медиафайл" if kind == "media" else "файл",
-                                  200 if kind == "media" else 5))
+                                  200 if kind == "media" else 50))
             actual_kind = attachment_kind(path)
             if kind == "media" and actual_kind not in ("photo", "video"):
                 raise ValueError("Выбранный файл не является фотографией или видео")
@@ -1629,10 +1636,12 @@ class App:
             if item and path:
                 item["media_path"] = path
                 self.schedule_save_chats()
-                active = self.active_online_chat
-                if active:
-                    self.active_online_chat = None
-                    self.open_online_chat(active)
+                row = getattr(self, "online_media_rows", {}).get(local_id)
+                if row is not None and row.winfo_exists():
+                    self.add_online_message(self.online_transcript, item.get("text", ""),
+                                            item.get("outgoing", False), status=item.get("status"),
+                                            local_id=local_id, scroll=False, attachment=item.get("attachment"),
+                                            media_path=path, reuse_row=row)
                 if event.get("open_after"):
                     if event.get("media_kind") == "photo":
                         self.show_photo_overlay(path)

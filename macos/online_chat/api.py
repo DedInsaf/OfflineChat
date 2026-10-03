@@ -134,13 +134,13 @@ class OnlineAPI:
             "body": text,
             "session_token": token,
             "attachment": attachment,
-        }, timeout=60 if attachment else 8)
+        }, timeout=300 if attachment else 8)
 
     def send_file(self, sender, recipient, client_id, path, token):
         with open(path, "rb") as stream:
-            data = stream.read(5 * 1024 * 1024 + 1)
-        if not 0 < len(data) <= 5 * 1024 * 1024:
-            raise OnlineAPIError("Выберите непустой файл размером до 5 МБ")
+            data = stream.read(50 * 1024 * 1024 + 1)
+        if not 0 < len(data) <= 50 * 1024 * 1024:
+            raise OnlineAPIError("Выберите непустой файл размером до 50 МБ")
         return self.send(sender, recipient, client_id, "", token, {
             "name": Path(path).name, "data_base64": base64.b64encode(data).decode("ascii"),
         })
@@ -148,7 +148,7 @@ class OnlineAPI:
     def download_file(self, username, token, message_id, attachment):
         result = self.request("files/download", {
             "username": username, "session_token": token, "message_id": message_id,
-        }, timeout=60)
+        }, timeout=300)
         data = base64.b64decode(result["data_base64"], validate=True)
         if len(data) != attachment["size"] or hashlib.sha256(data).hexdigest() != attachment["sha256"]:
             raise OnlineAPIError("Файл повреждён при передаче. Повторите скачивание.")

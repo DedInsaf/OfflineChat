@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,19}$")
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 STATUS_RANK = {"sent": 1, "delivered": 2, "read": 3}
-MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_ATTACHMENT_STORAGE = 100 * 1024 * 1024
 
 
@@ -474,13 +474,13 @@ class ChatDatabase:
                         or any(ord(c) < 32 or ord(c) == 127 for c in filename)):
                     raise ChatDatabaseError("invalid filename")
                 if not isinstance(encoded, str) or len(encoded) > ((MAX_FILE_BYTES + 2) // 3) * 4:
-                    raise ChatDatabaseError("file exceeds 5 MB", 413)
+                    raise ChatDatabaseError("file exceeds 50 MB", 413)
                 try:
                     content = base64.b64decode(encoded, validate=True)
                 except (ValueError, binascii.Error):
                     raise ChatDatabaseError("invalid file encoding")
                 if not 0 < len(content) <= MAX_FILE_BYTES:
-                    raise ChatDatabaseError("file must contain 1 byte to 5 MB", 413)
+                    raise ChatDatabaseError("file must contain 1 byte to 50 MB", 413)
                 metadata = json.dumps({"name": filename, "size": len(content),
                                        "sha256": hashlib.sha256(content).hexdigest()}, ensure_ascii=False)
             try:

@@ -11,7 +11,7 @@ except ImportError:  # The source version still sends originals without Pillow.
     Image = None
     ImageOps = None
 
-LIMIT = 5 * 1024 * 1024
+LIMIT = 50 * 1024 * 1024
 
 
 def _stage_photo(source, target):
@@ -71,7 +71,7 @@ def stage(source, client_id, root=None, media_kind=None):
         data = stream.read(LIMIT + 1)
     if not 0 < len(data) <= LIMIT:
         label = "медиафайл" if media_kind in ("photo", "video") else "файл"
-        raise ValueError("Не удалось подготовить %s размером до 5 МБ" % label)
+        raise ValueError("Не удалось подготовить %s размером до 50 МБ" % label)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=directory, delete=False) as stream:

@@ -114,6 +114,9 @@ struct OnlineChatView: View {
     @State private var videoRecording = false
     @State private var recordPress: Date?
     @State private var recordJob: DispatchWorkItem?
+    @State private var recordingLocked = false
+    @State private var recordingCancelled = false
+    @State private var recordedDraft: URL?
 
     private var profile: OnlineProfile? { store.profiles[peer] }
     private var items: [OnlineMessage] { store.messages[peer] ?? [] }
@@ -247,8 +250,22 @@ struct OnlineChatView: View {
             if recorder.recording {
                 if videoRecording { RecordingPreview(session: recorder.session).frame(width: 180, height: 180).clipShape(Circle()) }
                 HStack {
-                    Text("● Запись · максимум 60 секунд").foregroundStyle(.red)
-                    Button("Отменить") { recorder.cancel() }
+                    TimelineView(.periodic(from: .now, by: 0.2)) { _ in
+                        Text("● " + recorder.durationText).monospacedDigit().foregroundStyle(.red)
+                    }
+                    Text(recordingLocked ? "Запись закреплена" : "← отмена · ↑ закрепить").font(.caption)
+                    Button("Отменить") { discardRecording() }
+                    if recordingLocked {
+                        Button("Прослушать") { recorder.finish() }
+                        Button("Отправить") { recordingLocked = false; recorder.finish() }
+                    }
+                }
+            }
+            if let recordedDraft {
+                RecordedMessageView(url: recordedDraft, circle: videoRecording)
+                HStack {
+                    Button("Удалить", role: .destructive) { try? FileManager.default.removeItem(at: recordedDraft); self.recordedDraft = nil }
+                    Button("Отправить") { store.sendPickedFile(recordedDraft, to: peer); self.recordedDraft = nil }
                 }
             }
         HStack(alignment: .bottom, spacing: 8) {
@@ -260,6 +277,7 @@ struct OnlineChatView: View {
                 .background(Color.ocSurfaceAlt)
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .focused($composerFocused)
+                .disabled(recorder.recording)
                 .onChange(of: draft) { _, value in
                     if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { store.sendTyping(to: peer) }
                 }
@@ -269,25 +287,46 @@ struct OnlineChatView: View {
                     .frame(width: 42, height: 42)
                     .foregroundStyle(Color.ocPrimaryFg)
                     .background(recorder.recording ? Color.red : Color.ocPrimary, in: Circle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { _ in
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
+                        if gesture.translation.width < -80 && !recordingLocked {
+                            recordingCancelled = true
+                            recordJob?.cancel()
+                            recorder.cancel()
+                            return
+                        }
+                        if gesture.translation.height < -65 && !recordingCancelled {
+                            recordingLocked = true
+                        }
+                        guard !recordingCancelled else { return }
                         guard recordPress == nil else { return }
                         recordPress = Date()
                         let job = DispatchWorkItem {
                             recorder.start(video: videoRecording) { url in
                                 guard let url else { return }
-                                store.sendPickedFile(url, to: peer)
+                                if recordingLocked { recordedDraft = url; recordingLocked = false }
+                                else { store.sendPickedFile(url, to: peer) }
                             }
                         }
                         recordJob = job
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: job)
                     }.onEnded { _ in
                         recordJob?.cancel()
-                        if let pressed = recordPress, Date().timeIntervalSince(pressed) < 0.25 { videoRecording.toggle() }
+                        if recordingCancelled { recordingCancelled = false }
+                        else if recordingLocked {
+                            if !recorder.recording {
+                                recorder.start(video: videoRecording) { url in
+                                    guard let url else { return }
+                                    if recordingLocked { recordedDraft = url; recordingLocked = false }
+                                    else { store.sendPickedFile(url, to: peer) }
+                                }
+                            }
+                        }
+                        else if let pressed = recordPress, Date().timeIntervalSince(pressed) < 0.25 { videoRecording.toggle() }
                         else { recorder.finish() }
                         recordPress = nil
                     })
                     .accessibilityLabel(videoRecording ? "Видеокружок. Удерживайте для записи" : "Голосовое. Удерживайте для записи")
-                    .disabled(store.preparingFile)
+                    .disabled(store.preparingFile || recordingLocked || recordedDraft != nil)
             } else {
             Button {
                 let value = draft
@@ -308,10 +347,24 @@ struct OnlineChatView: View {
         .padding(.vertical, 8)
         .background(.ultraThinMaterial)
         }
-        .onDisappear { recordJob?.cancel(); recorder.cancel() }
+        .onDisappear { discardRecording() }
+        .onChange(of: recorder.recording) { _, recording in
+            if !recording { recordPress = nil; recordJob = nil }
+        }
         .alert("Запись", isPresented: Binding(get: { !recorder.error.isEmpty }, set: { if !$0 { recorder.error = "" } })) {
             Button("ОК") { recorder.error = "" }
         } message: { Text(recorder.error) }
+    }
+
+    private func discardRecording() {
+        recordJob?.cancel()
+        recordPress = nil
+        recordJob = nil
+        recordingCancelled = false
+        recordingLocked = false
+        recorder.cancel()
+        if let recordedDraft { try? FileManager.default.removeItem(at: recordedDraft) }
+        recordedDraft = nil
     }
 
     private var attachmentButton: some View {

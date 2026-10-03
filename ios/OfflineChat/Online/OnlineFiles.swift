@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 
 enum OnlineFiles {
-    static let limit = 5 * 1024 * 1024
+    static let limit = 50 * 1024 * 1024
 
     static func folder(_ id: UUID) throws -> URL {
         let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
@@ -29,7 +29,7 @@ enum OnlineFiles {
         defer { try? stream.close() }
         let data = try stream.read(upToCount: limit + 1) ?? Data()
         guard !data.isEmpty, data.count <= limit else {
-            throw failure("Выберите непустой файл размером до 5 МБ")
+            throw failure("Выберите непустой файл размером до 50 МБ")
         }
         return data
     }
@@ -62,7 +62,7 @@ enum OnlineFiles {
         try await Task.detached(priority: .utility) {
             guard safeName(name) else { throw failure("Недопустимое имя файла") }
             guard !data.isEmpty, data.count <= limit else {
-                throw failure("Выберите файл размером до 5 МБ")
+                throw failure("Выберите файл размером до 50 МБ")
             }
             let directory = try folder(id)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

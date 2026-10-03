@@ -12,7 +12,7 @@ from .database import ChatDatabase, ChatDatabaseError
 from .emailer import EmailDeliveryError, configured_code_sender
 
 
-MAX_BODY_BYTES = 7_100_000  # 5 MiB file encoded as base64 plus JSON metadata
+MAX_BODY_BYTES = 71_000_000  # 50 MiB file encoded as base64 plus JSON metadata
 
 
 class ServerState:

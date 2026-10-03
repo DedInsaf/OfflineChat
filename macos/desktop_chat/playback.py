@@ -6,11 +6,13 @@ import shutil
 import subprocess
 import threading
 import tkinter as tk
+import weakref
 
 from .shared import THEME, ui_font, Image, ImageTk
 
 
 class RecordedMessage(tk.Canvas):
+    active = None
     def __init__(self, master, path, circle=False):
         self.circle = circle
         self.side = 200
@@ -18,7 +20,7 @@ class RecordedMessage(tk.Canvas):
                          bg=THEME["chat_bg"], highlightthickness=0, cursor="hand2")
         from AVFoundation import AVPlayer
         from Foundation import NSURL
-        self.player = AVPlayer.playerWithURL_(NSURL.fileURLWithPath_(path))
+        self.player = None
         self.path = path
         self.playing = False
         self.closed = False
@@ -32,8 +34,7 @@ class RecordedMessage(tk.Canvas):
         self.executable = shutil.which("ffmpeg") or ("/opt/homebrew/bin/ffmpeg" if os.path.isfile("/opt/homebrew/bin/ffmpeg") else None)
         self.bind("<Button-1>", self.toggle)
         self.bind("<Destroy>", self.destroy_player)
-        if circle: self.decode_video(0, preview=True)
-        else: threading.Thread(target=self.read_waveform, daemon=True).start()
+        self.last_draw = None
         self.tick()
 
     def read_waveform(self):
@@ -47,6 +48,7 @@ class RecordedMessage(tk.Canvas):
             self.results.put([value / peak for value in bars])
 
     def position(self):
+        if self.player is None: return 0
         time = self.player.currentTime()
         return time.value / time.timescale if time.timescale else 0
 
@@ -81,6 +83,15 @@ class RecordedMessage(tk.Canvas):
         threading.Thread(target=decode, daemon=True).start()
 
     def toggle(self, _event=None):
+        previous = RecordedMessage.active() if RecordedMessage.active else None
+        if previous is not None and previous is not self and not previous.closed and previous.playing:
+            previous.toggle()
+        RecordedMessage.active = weakref.ref(self)
+        if self.player is None:
+            from AVFoundation import AVPlayer
+            from Foundation import NSURL
+            self.player = AVPlayer.playerWithURL_(NSURL.fileURLWithPath_(self.path))
+            if not self.circle: threading.Thread(target=self.read_waveform, daemon=True).start()
         if self.playing:
             self.player.pause()
             if self.decoder and self.decoder.poll() is None: self.decoder.terminate()
@@ -99,11 +110,18 @@ class RecordedMessage(tk.Canvas):
         except queue.Empty: pass
         try: self.waveform = self.results.get_nowait()
         except queue.Empty: pass
-        duration = self.player.currentItem().duration()
-        if duration.timescale:
-            self.duration = max(0, duration.value / duration.timescale)
+        if self.player is not None:
+            duration = self.player.currentItem().duration()
+            if duration.timescale:
+                self.duration = max(0, duration.value / duration.timescale)
         elapsed = max(0, self.position())
         if self.duration > 0 and elapsed >= self.duration - 0.1: self.playing = False
+        target = 280 if self.playing else 200
+        draw_key = (self.playing, int(elapsed * 5), id(self.frame), len(self.waveform), self.side, int(self.duration))
+        if draw_key == self.last_draw:
+            self.after(120 if self.playing else 500, self.tick)
+            return
+        self.last_draw = draw_key
         self.delete("all")
         seconds = int(elapsed if elapsed > 0 else self.duration)
         label = "%02d:%02d" % (seconds // 60, seconds % 60)
@@ -137,5 +155,5 @@ class RecordedMessage(tk.Canvas):
     def destroy_player(self, event):
         if event.widget is not self: return
         self.closed = True
-        self.player.pause()
+        if self.player is not None: self.player.pause()
         if self.decoder and self.decoder.poll() is None: self.decoder.terminate()
