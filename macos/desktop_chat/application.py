@@ -3,6 +3,7 @@
 from .shared import *
 from .bluetooth import ble_worker
 from .recording import RecordingButton
+from .playback import RecordedMessage
 
 
 class App:
@@ -458,7 +459,9 @@ class App:
                 if not shown and not outgoing and local_id:
                     self.root.after(80, lambda mid=local_id: self.load_online_media(mid, open_after=False))
             elif kind in ("video", "circle", "voice"):
-                if kind == "circle":
+                if kind in ("circle", "voice") and media_path and os.path.isfile(media_path):
+                    RecordedMessage(holder, media_path, circle=kind == "circle").pack()
+                elif kind == "circle":
                     card = tk.Canvas(holder, bg=THEME["chat_bg"], width=210, height=210, highlightthickness=0, cursor="hand2")
                     card.pack()
                     card.create_oval(2, 2, 208, 208, fill="#171A1F", outline="")
@@ -467,6 +470,8 @@ class App:
                     card.bind("<Button-1>", lambda event, mid=local_id: self.open_online_media(mid))
                 else:
                     self.add_recorded_media_card(holder, kind, attachment, local_id)
+                if kind in ("circle", "voice") and not media_path and local_id:
+                    self.root.after(80, lambda mid=local_id: self.load_online_media(mid, open_after=False))
             else:
                 card = tk.Frame(holder, bg=bg, cursor="hand2", padx=12, pady=10)
                 card.pack(fill="x")
@@ -719,6 +724,9 @@ class App:
             return
         path = item.get("media_path") or item.get("file_path")
         kind = attachment_kind(item["attachment"].get("name"))
+        if kind in ("voice", "circle"):
+            self.load_online_media(local_id, open_after=False)
+            return
         if path and os.path.isfile(path):
             if kind == "photo":
                 self.show_photo_overlay(path)

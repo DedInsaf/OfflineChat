@@ -123,7 +123,7 @@ struct OnlineMessageBubble: View {
 
     var body: some View {
         HStack(alignment: .bottom) {
-            if outgoing { Spacer(minLength: 54) }
+            if outgoing { Spacer(minLength: message.attachment?.kind == "circle" ? 8 : 24) }
             VStack(alignment: .leading, spacing: 3) {
                 if let attachment = message.attachment {
                     attachmentContent(attachment)
@@ -142,13 +142,13 @@ struct OnlineMessageBubble: View {
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 7)
-            .background(outgoing ? Color.ocOutgoing : Color.ocIncoming)
+            .background(message.attachment?.kind == "circle" ? Color.clear : (outgoing ? Color.ocOutgoing : Color.ocIncoming))
             .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
             .onTapGesture { if message.status == .failed { onRetry() } }
-            if !outgoing { Spacer(minLength: 54) }
+            if !outgoing { Spacer(minLength: message.attachment?.kind == "circle" ? 8 : 24) }
         }
         .task(id: message.serverID) {
-            guard message.attachment?.kind == "photo", mediaURL == nil, message.serverID != nil else { return }
+            guard ["photo", "voice", "circle"].contains(message.attachment?.kind ?? ""), mediaURL == nil, message.serverID != nil else { return }
             await load(openWhenReady: false)
         }
     }

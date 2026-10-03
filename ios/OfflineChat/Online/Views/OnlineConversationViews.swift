@@ -252,6 +252,17 @@ struct OnlineChatView: View {
                 }
             }
         HStack(alignment: .bottom, spacing: 8) {
+            attachmentButton
+            TextField("Сообщение", text: $draft, axis: .vertical)
+                .lineLimit(1...5)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.ocSurfaceAlt)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .focused($composerFocused)
+                .onChange(of: draft) { _, value in
+                    if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { store.sendTyping(to: peer) }
+                }
             if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Image(systemName: videoRecording ? "video.fill" : "mic.fill")
                     .font(.system(size: 20))
@@ -279,30 +290,6 @@ struct OnlineChatView: View {
                     .disabled(store.preparingFile)
             } else {
             Button {
-                composerFocused = false
-                withAnimation(.easeOut(duration: 0.14)) {
-                    showAttachmentMenu.toggle()
-                }
-            } label: {
-                Image(systemName: "paperclip")
-                    .font(.system(size: 20, weight: .regular))
-                    .frame(width: 38, height: 42)
-            }
-            .disabled(store.preparingFile || loadingMedia)
-            .accessibilityLabel("Прикрепить фото, видео или файл до 5 МБ")
-            TextField("Сообщение", text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Color.ocSurfaceAlt)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .focused($composerFocused)
-                .onChange(of: draft) { _, value in
-                    if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        store.sendTyping(to: peer)
-                    }
-                }
-            Button {
                 let value = draft
                 draft = ""
                 Task { await store.send(value, to: peer) }
@@ -325,6 +312,17 @@ struct OnlineChatView: View {
         .alert("Запись", isPresented: Binding(get: { !recorder.error.isEmpty }, set: { if !$0 { recorder.error = "" } })) {
             Button("ОК") { recorder.error = "" }
         } message: { Text(recorder.error) }
+    }
+
+    private var attachmentButton: some View {
+        Button {
+            composerFocused = false
+            withAnimation(.easeOut(duration: 0.14)) { showAttachmentMenu.toggle() }
+        } label: {
+            Image(systemName: "paperclip").font(.system(size: 20)).frame(width: 38, height: 42)
+        }
+        .disabled(store.preparingFile || loadingMedia || recorder.recording)
+        .accessibilityLabel("Прикрепить")
     }
 
     private func loadMedia(_ item: PhotosPickerItem) {
