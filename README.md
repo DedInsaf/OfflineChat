@@ -58,8 +58,8 @@ os.environ["OFFLINECHAT_EMAIL_FROM_NAME"] = "Связь"
 `OFFLINECHAT_SMTP_PORT`, `OFFLINECHAT_SMTP_USERNAME`,
 `OFFLINECHAT_SMTP_PASSWORD` и `OFFLINECHAT_SMTP_FROM`.
 
-В коде клиентов и сервера лимит файлов поднят до 50 МиБ; для действующего
-хостинга нужно обновить сервер и перезагрузить web-приложение. Вложения
+Лимит файлов в клиентах и на действующем сервере — 50 МиБ
+(сервер обновлён и перезагружен 3 октября 2026). Вложения
 выбираются через скрепку на iPhone и Mac. Подробности, ограничения и протокол:
 [docs/FILES.md](docs/FILES.md).
 
