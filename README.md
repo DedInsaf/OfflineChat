@@ -58,8 +58,10 @@ os.environ["OFFLINECHAT_EMAIL_FROM_NAME"] = "Связь"
 `OFFLINECHAT_SMTP_PORT`, `OFFLINECHAT_SMTP_USERNAME`,
 `OFFLINECHAT_SMTP_PASSWORD` и `OFFLINECHAT_SMTP_FROM`.
 
-Онлайн-чат поддерживает файлы до 5 МиБ: скрепка на iPhone и кнопка «Файл»
-на Mac. Подробности, ограничения и протокол: [docs/FILES.md](docs/FILES.md).
+В коде клиентов и сервера лимит файлов поднят до 50 МиБ; для действующего
+хостинга нужно обновить сервер и перезагрузить web-приложение. Вложения
+выбираются через скрепку на iPhone и Mac. Подробности, ограничения и протокол:
+[docs/FILES.md](docs/FILES.md).
 
 Тестовый адрес по умолчанию: `https://dedinsaf.pythonanywhere.com`.
 Развёртывание: `docs/HOSTING_TEST.md`. Собственная серверная часть не использует

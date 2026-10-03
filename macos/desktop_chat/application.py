@@ -418,6 +418,7 @@ class App:
         recording_peer = self.active_online_chat
         RecordingButton(inner, send=lambda path: self.queue_online_file(path, recipient=recording_peer),
                         report=lambda error: self.set_status("Запись", THEME["danger"], error),
+                        status_host=bar,
                         bg=THEME["surface"], fg=THEME["accent"], font=ui_font(18)).pack(side="right", padx=6)
         self.online_entry.focus()
         self._list_dirty = True
@@ -444,12 +445,8 @@ class App:
                 shown = False
                 if media_path and os.path.isfile(media_path) and Image is not None and ImageTk is not None:
                     try:
-                        with Image.open(media_path) as opened:
-                            image = opened.copy()
-                        image.thumbnail((360, 260), Image.Resampling.LANCZOS)
-                        photo = ImageTk.PhotoImage(image)
-                        preview = tk.Label(card, image=photo, bg=bg, borderwidth=0, highlightthickness=0)
-                        preview.image = photo
+                        from .photos import PhotoPreview
+                        preview = PhotoPreview(card, media_path, transcript.canvas, bg=bg)
                         preview.pack()
                         shown = True
                     except Exception as error:
@@ -774,8 +771,10 @@ class App:
         self.overlay = overlay
         try:
             with Image.open(path) as opened:
-                image = opened.copy()
-            image.thumbnail((1000, 680), Image.Resampling.LANCZOS)
+                from PIL import ImageOps
+                image = ImageOps.exif_transpose(opened)
+            image.thumbnail((max(100, self.root.winfo_width() - 36),
+                             max(100, self.root.winfo_height() - 100)), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image)
             label = tk.Label(overlay, image=photo, bg="#090B0E", borderwidth=0, highlightthickness=0)
             label.image = photo

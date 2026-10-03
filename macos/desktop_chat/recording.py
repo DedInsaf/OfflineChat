@@ -12,8 +12,9 @@ import io
 
 
 class RecordingButton(tk.Button):
-    def __init__(self, master, send, report, **kwargs):
+    def __init__(self, master, send, report, status_host=None, **kwargs):
         super().__init__(master, text="", relief="flat", **kwargs)
+        self.idle_fg = self.cget("fg")
         self.send, self.report = send, report
         self.video = False
         self.job = None
@@ -26,6 +27,10 @@ class RecordingButton(tk.Button):
         self.draft = None
         self.actions = None
         self.preview = None
+        self.status_host = status_host or master
+        self.panel = None
+        self.status_label = None
+        self.timer_job = None
         self.generation = 0
         self.finalizing = False
         self.icons = {}
@@ -50,7 +55,7 @@ class RecordingButton(tk.Button):
 
     def show_mode(self):
         image = self.icons.get("video.fill" if self.video else "mic.fill")
-        self.configure(image=image or "", text="" if image else ("Видео" if self.video else "Голос"))
+        self.configure(image=image or "", text="" if image else ("Видео" if self.video else "Голос"), fg=self.idle_fg)
 
     def poll(self):
         try:
@@ -60,6 +65,7 @@ class RecordingButton(tk.Button):
                     if path and os.path.isfile(path): os.unlink(path)
                     continue
                 self.show_mode()
+                self.hide_status()
                 if path and review:
                     self.draft = path
                     self.show_actions(review=True)
@@ -86,15 +92,16 @@ class RecordingButton(tk.Button):
             self.show_actions()
 
     def show_actions(self, review=False):
+        self.show_status("Запись готова" if review else None)
         if self.actions: self.actions.destroy()
-        self.actions = tk.Frame(self.master, bg=self.cget("bg"))
-        self.actions.pack(side="right")
+        self.actions = tk.Frame(self.panel, bg=self.cget("bg"))
+        self.actions.pack(fill="x", padx=12, pady=(0, 8))
         tk.Button(self.actions, text="Удалить" if review else "Отмена", command=self.cancel).pack(side="left")
         if review:
             from .playback import RecordedMessage
             if self.preview: self.preview.destroy()
-            self.preview = RecordedMessage(self.master, self.draft, circle=self.video)
-            self.preview.pack(side="left")
+            self.preview = RecordedMessage(self.panel, self.draft, circle=self.video)
+            self.preview.pack(anchor="w", padx=12, pady=6, before=self.actions)
             tk.Button(self.actions, text="Отправить", command=self.send_draft).pack(side="left")
         else:
             tk.Button(self.actions, text="Прослушать", command=lambda: self.finish(review=True)).pack(side="left")
@@ -109,6 +116,41 @@ class RecordingButton(tk.Button):
         if self.actions: self.actions.destroy(); self.actions = None
         if self.preview: self.preview.destroy(); self.preview = None
         self.locked = False
+        self.hide_status()
+
+    def show_status(self, text=None):
+        if self.timer_job:
+            self.after_cancel(self.timer_job)
+            self.timer_job = None
+        if self.panel is None:
+            self.panel = tk.Frame(self.status_host, bg=self.cget("bg"))
+            children = self.status_host.winfo_children()
+            siblings = [child for child in children if child is not self.panel]
+            self.panel.pack(fill="x", before=siblings[0] if siblings else None)
+            self.status_label = tk.Label(self.panel, bg=self.cget("bg"), fg="#E25B5B",
+                                         anchor="w", justify="left", wraplength=380,
+                                         font=("Helvetica", 13, "bold"))
+            self.status_label.pack(fill="x", padx=12, pady=8)
+        if text:
+            self.status_label.configure(text=text)
+        else:
+            self.update_status()
+
+    def update_status(self):
+        self.timer_job = None
+        if not self.panel or not self.process: return
+        seconds = int(time.monotonic() - self.started)
+        mode = "Видео" if self.video else "Голос"
+        hint = "Запись закреплена" if self.locked else "↑ Закрепить   ·   ← Отменить"
+        self.status_label.configure(text=f"● {mode}  {seconds // 60:02d}:{seconds % 60:02d}   {hint}")
+        self.timer_job = self.after(250, self.update_status)
+
+    def hide_status(self):
+        if self.timer_job:
+            self.after_cancel(self.timer_job)
+            self.timer_job = None
+        if self.panel: self.panel.destroy()
+        self.panel = self.status_label = None
 
     def start(self):
         self.generation += 1
@@ -127,9 +169,14 @@ class RecordingButton(tk.Button):
         if self.video:
             arguments += ["-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=320:320", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "350k", "-pix_fmt", "yuv420p"]
         arguments += ["-c:a", "aac", "-b:a", "48k", self.path]
-        self.process = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self.process = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self.report("Не удалось начать запись: %s" % error)
+            return
         self.started = time.monotonic()
         self.configure(image="", text="● Отпустите", fg="#E25B5B")
+        self.show_status()
         process = self.process
         self.after(61000, lambda: self.finish() if self.process is process else None)
 
@@ -163,6 +210,7 @@ class RecordingButton(tk.Button):
         duration = time.monotonic() - self.started
         if self.winfo_exists():
             self.show_mode()
+            if not cancel: self.show_status("Обработка записи…")
         def finalize():
             try:
                 process.communicate(input=b"q\n", timeout=8)
