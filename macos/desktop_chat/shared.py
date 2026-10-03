@@ -321,6 +321,11 @@ VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".webm"}
 
 
 def attachment_kind(filename):
+    name = os.path.basename(str(filename or ""))
+    if name.startswith("oc-voice-"):
+        return "voice"
+    if name.startswith("oc-circle-"):
+        return "circle"
     extension = os.path.splitext(str(filename or ""))[1].lower()
     if extension in PHOTO_EXTENSIONS:
         return "photo"
@@ -330,12 +335,14 @@ def attachment_kind(filename):
 
 
 def attachment_icon(filename):
-    return {"photo": "▣", "video": "▶", "file": "▤"}[attachment_kind(filename)]
+    return {"photo": "▣", "video": "▶", "voice": "▶", "circle": "▶", "file": "▤"}[attachment_kind(filename)]
 
 
 def attachment_preview_text(attachment):
     name = (attachment or {}).get("name") or "Вложение"
     kind = attachment_kind(name)
+    if kind == "voice": return "Голосовое сообщение"
+    if kind == "circle": return "Видеокружок"
     return "Фото" if kind == "photo" else ("Видео" if kind == "video" else "📎 " + name)
 
 
@@ -798,4 +805,3 @@ class IncomingDialog(tk.Frame):
         self.grab_release()
         self.destroy()
         self.on_deny()
-

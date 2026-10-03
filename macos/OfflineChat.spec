@@ -74,6 +74,8 @@ app = BUNDLE(
     icon=None,
     bundle_identifier='com.offlinechat.app',
     info_plist={
+        'NSMicrophoneUsageDescription': 'Запись голосовых сообщений и видеокружков.',
+        'NSCameraUsageDescription': 'Запись видеокружков в онлайн-чате.',
         'NSBluetoothAlwaysUsageDescription': 'OfflineChat использует Bluetooth для обмена сообщениями между устройствами.',
         'NSBluetoothPeripheralUsageDescription': 'OfflineChat использует Bluetooth для обмена сообщениями между устройствами.',
         'CFBundleName': 'OfflineChat',

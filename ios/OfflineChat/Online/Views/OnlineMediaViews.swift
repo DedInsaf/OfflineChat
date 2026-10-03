@@ -156,6 +156,16 @@ struct OnlineMessageBubble: View {
     @ViewBuilder
     private func attachmentContent(_ attachment: OnlineAttachment) -> some View {
         switch attachment.kind {
+        case "voice", "circle":
+            if let mediaURL {
+                RecordedMessageView(url: mediaURL, circle: attachment.kind == "circle")
+            } else {
+                Button { Task { await load(openWhenReady: false) } } label: {
+                    Label(loading ? "Загрузка…" : (attachment.kind == "circle" ? "Видеокружок" : "Голосовое сообщение"), systemImage: "play.fill")
+                        .frame(width: attachment.kind == "circle" ? 210 : 220, height: attachment.kind == "circle" ? 210 : 48)
+                        .background(Color.black.opacity(0.1), in: RoundedRectangle(cornerRadius: attachment.kind == "circle" ? 105 : 16))
+                }.disabled(loading || message.serverID == nil)
+            }
         case "photo":
             Button { Task { await load(openWhenReady: true) } } label: {
                 ZStack {

@@ -55,6 +55,8 @@ struct OnlineMessage: Codable, Equatable, Identifiable {
         switch attachment.kind {
         case "photo": return "Фото"
         case "video": return "Видео"
+        case "voice": return "Голосовое сообщение"
+        case "circle": return "Видеокружок"
         default: return "📎 " + attachment.name
         }
     }
@@ -84,6 +86,8 @@ struct OnlineAttachment: Codable, Equatable {
     var sizeText: String { ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file) }
 
     var kind: String {
+        if name.hasPrefix("oc-voice-") { return "voice" }
+        if name.hasPrefix("oc-circle-") { return "circle" }
         let ext = (name as NSString).pathExtension.lowercased()
         if ["jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tif", "tiff"].contains(ext) { return "photo" }
         if ["mov", "mp4", "m4v", "avi", "mkv", "webm"].contains(ext) { return "video" }

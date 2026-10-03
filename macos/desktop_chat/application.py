@@ -2,6 +2,7 @@
 
 from .shared import *
 from .bluetooth import ble_worker
+from .recording import RecordingButton
 
 
 class App:
@@ -412,6 +413,10 @@ class App:
         self.online_entry.bind("<Return>", lambda _e: self.send_online_msg())
         self.online_entry.bind("<KeyRelease>", lambda _e: self.ping_online_typing())
         PillButton(inner, "Отправить", command=self.send_online_msg, width=120, height=36).pack(side="right", padx=6, pady=6)
+        recording_peer = self.active_online_chat
+        RecordingButton(inner, send=lambda path: self.queue_online_file(path, recipient=recording_peer),
+                        report=lambda error: self.set_status("Запись", THEME["danger"], error),
+                        bg=THEME["surface"], fg=THEME["accent"], font=ui_font(18)).pack(side="right", padx=6)
         self.online_entry.focus()
         self._list_dirty = True
 
@@ -452,14 +457,16 @@ class App:
                 bind_click(card, lambda mid=local_id: self.open_online_media(mid))
                 if not shown and not outgoing and local_id:
                     self.root.after(80, lambda mid=local_id: self.load_online_media(mid, open_after=False))
-            elif kind == "video":
-                card = tk.Frame(holder, bg="#171A1F", cursor="hand2", width=320, height=180)
-                card.pack_propagate(False)
-                card.pack()
-                tk.Label(card, text="▶", bg="#171A1F", fg="#FFFFFF", font=ui_font(34, "bold")).place(relx=0.5, rely=0.44, anchor="center")
-                tk.Label(card, text="Видео · " + file_size_text(attachment.get("size")), bg="#171A1F",
-                         fg="#D8DADF", font=ui_font(11, "bold")).place(relx=0.5, rely=0.69, anchor="center")
-                bind_click(card, lambda mid=local_id: self.open_online_media(mid))
+            elif kind in ("video", "circle", "voice"):
+                if kind == "circle":
+                    card = tk.Canvas(holder, bg=THEME["chat_bg"], width=210, height=210, highlightthickness=0, cursor="hand2")
+                    card.pack()
+                    card.create_oval(2, 2, 208, 208, fill="#171A1F", outline="")
+                    card.create_text(105, 92, text="▶", fill="#FFFFFF", font=ui_font(30))
+                    card.create_text(105, 135, text="Видеокружок", fill="#D8DADF", font=ui_font(11))
+                    card.bind("<Button-1>", lambda event, mid=local_id: self.open_online_media(mid))
+                else:
+                    self.add_recorded_media_card(holder, kind, attachment, local_id)
             else:
                 card = tk.Frame(holder, bg=bg, cursor="hand2", padx=12, pady=10)
                 card.pack(fill="x")
@@ -483,6 +490,15 @@ class App:
                 mark.bind("<Button-1>", lambda _event, mid=local_id: self.retry_online_message(mid))
         if scroll:
             transcript.scroll_to_end()
+
+    def add_recorded_media_card(self, holder, kind, attachment, local_id):
+        card = tk.Frame(holder, bg="#171A1F", cursor="hand2", width=280 if kind == "voice" else 320, height=70 if kind == "voice" else 180)
+        card.pack_propagate(False)
+        card.pack()
+        tk.Label(card, text="▶", bg="#171A1F", fg="#FFFFFF", font=ui_font(22, "bold")).place(relx=0.12 if kind == "voice" else 0.5, rely=0.44, anchor="center")
+        tk.Label(card, text=("Голосовое" if kind == "voice" else "Видео") + " · " + file_size_text(attachment.get("size")), bg="#171A1F",
+                 fg="#D8DADF", font=ui_font(11, "bold")).place(relx=0.58 if kind == "voice" else 0.5, rely=0.5 if kind == "voice" else 0.69, anchor="center")
+        bind_click(card, lambda mid=local_id: self.open_online_media(mid))
 
     def update_online_tick(self, local_id, status):
         mark = self.online_ticks.get(local_id)
@@ -646,8 +662,9 @@ class App:
     def send_online_file(self, kind="file"):
         self.choose_online_attachment(kind)
 
-    def queue_online_file(self, path, kind="file"):
-        if not self.active_online_chat or not self.online_username:
+    def queue_online_file(self, path, kind="file", recipient=None):
+        recipient = recipient or self.active_online_chat
+        if not recipient or not self.online_username:
             return
         if not path:
             return
@@ -669,12 +686,13 @@ class App:
         text = attachment_preview_text(attachment)
         item = {"text": text, "attachment": attachment, "file_path": path, "outgoing": True,
                 "status": "sending", "local_id": local_id, "created_at": time.time(), "sort_at": time.time()}
-        self.online_chats.setdefault(self.active_online_chat, []).append(item)
+        self.online_chats.setdefault(recipient, []).append(item)
         self.schedule_save_chats()
-        self.online_command_queue.put({"type": "online_send_file", "recipient": self.active_online_chat,
+        self.online_command_queue.put({"type": "online_send_file", "recipient": recipient,
                                        "local_id": local_id, "file_path": path, "media_kind": actual_kind})
-        self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id,
-                                attachment=attachment, media_path=path)
+        if recipient == self.active_online_chat:
+            self.add_online_message(self.online_transcript, text, True, status="sending", local_id=local_id,
+                                    attachment=attachment, media_path=path)
         self._list_dirty = True
 
     def download_online_file(self, local_id):
@@ -767,6 +785,12 @@ class App:
             overlay.layer().setBackgroundColor_(NSColor.blackColor().CGColor())
             player_view = AVPlayerView.alloc().initWithFrame_(bounds)
             player_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+            if attachment_kind(path) == "circle":
+                side = min(float(bounds.size.width), float(bounds.size.height)) * 0.75
+                player_view.setFrame_((((float(bounds.size.width) - side) / 2, (float(bounds.size.height) - side) / 2), (side, side)))
+                player_view.setWantsLayer_(True)
+                player_view.layer().setCornerRadius_(side / 2)
+                player_view.layer().setMasksToBounds_(True)
             player = AVPlayer.playerWithURL_(NSURL.fileURLWithPath_(path))
             player_view.setPlayer_(player)
             overlay.addSubview_(player_view)
@@ -1777,4 +1801,3 @@ def main():
     finally:
         command_queue.put({"type": "shutdown"})
         online_command_queue.put({"type": "shutdown"})
-

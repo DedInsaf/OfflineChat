@@ -110,6 +110,10 @@ struct OnlineChatView: View {
     @State private var loadingMedia = false
     @StateObject private var locationProvider = OnlineLocationProvider()
     @FocusState private var composerFocused: Bool
+    @StateObject private var recorder = OnlineMessageRecorder()
+    @State private var videoRecording = false
+    @State private var recordPress: Date?
+    @State private var recordJob: DispatchWorkItem?
 
     private var profile: OnlineProfile? { store.profiles[peer] }
     private var items: [OnlineMessage] { store.messages[peer] ?? [] }
@@ -239,7 +243,41 @@ struct OnlineChatView: View {
     }
 
     private var composer: some View {
+        VStack {
+            if recorder.recording {
+                if videoRecording { RecordingPreview(session: recorder.session).frame(width: 180, height: 180).clipShape(Circle()) }
+                HStack {
+                    Text("● Запись · максимум 60 секунд").foregroundStyle(.red)
+                    Button("Отменить") { recorder.cancel() }
+                }
+            }
         HStack(alignment: .bottom, spacing: 8) {
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Image(systemName: videoRecording ? "video.fill" : "mic.fill")
+                    .font(.system(size: 20))
+                    .frame(width: 42, height: 42)
+                    .foregroundStyle(Color.ocPrimaryFg)
+                    .background(recorder.recording ? Color.red : Color.ocPrimary, in: Circle())
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { _ in
+                        guard recordPress == nil else { return }
+                        recordPress = Date()
+                        let job = DispatchWorkItem {
+                            recorder.start(video: videoRecording) { url in
+                                guard let url else { return }
+                                store.sendPickedFile(url, to: peer)
+                            }
+                        }
+                        recordJob = job
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: job)
+                    }.onEnded { _ in
+                        recordJob?.cancel()
+                        if let pressed = recordPress, Date().timeIntervalSince(pressed) < 0.25 { videoRecording.toggle() }
+                        else { recorder.finish() }
+                        recordPress = nil
+                    })
+                    .accessibilityLabel(videoRecording ? "Видеокружок. Удерживайте для записи" : "Голосовое. Удерживайте для записи")
+                    .disabled(store.preparingFile)
+            } else {
             Button {
                 composerFocused = false
                 withAnimation(.easeOut(duration: 0.14)) {
@@ -277,10 +315,16 @@ struct OnlineChatView: View {
                     .clipShape(Circle())
             }
             .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial)
+        }
+        .onDisappear { recordJob?.cancel(); recorder.cancel() }
+        .alert("Запись", isPresented: Binding(get: { !recorder.error.isEmpty }, set: { if !$0 { recorder.error = "" } })) {
+            Button("ОК") { recorder.error = "" }
+        } message: { Text(recorder.error) }
     }
 
     private func loadMedia(_ item: PhotosPickerItem) {
