@@ -115,6 +115,11 @@ struct OnlineChatView: View {
     @State private var selectedIDs: Set<UUID> = []
     @State private var forwarding: [OnlineMessage] = []
     @State private var showForwardPicker = false
+    @State private var nearBottom = true
+    @State private var positionedInitially = false
+    @State private var recordingActive = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let bottomAnchor = "online-chat-bottom"
 
     private var profile: OnlineProfile? { store.profiles[peer] }
     private var items: [OnlineMessage] { store.messages[peer] ?? [] }
@@ -126,34 +131,30 @@ struct OnlineChatView: View {
                     ScrollView {
                         LazyVStack(spacing: 6) {
                             ForEach(items) { message in
-                                OnlineMessageBubble(
-                                    message: message,
-                                    outgoing: message.isOutgoing(for: store.username),
-                                    onRetry: { Task { await store.retry(message) } },
-                                    download: { reportErrors in
-                                        await store.downloadFile(message, reportErrors: reportErrors)
-                                    },
-                                    onOpenMedia: { url in
-                                        previewedMedia = PreviewedOnlineMedia(url: url, kind: message.attachment?.kind ?? "file")
-                                    },
-                                    onOpenFile: { url in downloadedFile = DownloadedOnlineFile(url: url) },
-                                    onOpenReply: { id in
-                                        if let target = items.first(where: { $0.id.uuidString.lowercased() == id.lowercased() }) {
-                                            withAnimation { proxy.scrollTo(target.id, anchor: .center) }
+                                OnlineSelectableMessageRow(selecting: selecting, selected: selectedIDs.contains(message.id), onSelect: { toggleSelection(message) }) {
+                                    OnlineMessageBubble(
+                                        message: message,
+                                        outgoing: message.isOutgoing(for: store.username),
+                                        onRetry: { Task { await store.retry(message) } },
+                                        download: { reportErrors in
+                                            await store.downloadFile(message, reportErrors: reportErrors)
+                                        },
+                                        onOpenMedia: { url in
+                                            previewedMedia = PreviewedOnlineMedia(url: url, kind: message.attachment?.kind ?? "file")
+                                        },
+                                        onOpenFile: { url in downloadedFile = DownloadedOnlineFile(url: url) },
+                                        onOpenReply: { id in
+                                            if let target = items.first(where: { $0.id.uuidString.lowercased() == id.lowercased() }) {
+                                                withAnimation { proxy.scrollTo(target.id, anchor: .center) }
+                                            }
                                         }
-                                    }
-                                )
-                                .overlay {
-                                    if selecting {
-                                        RoundedRectangle(cornerRadius: 14).fill(selectedIDs.contains(message.id) ? Color.ocPrimary.opacity(0.14) : Color.clear)
-                                            .contentShape(Rectangle())
-                                            .onTapGesture { toggleSelection(message) }
-                                    }
+                                    )
+                                    .equatable()
                                 }
                                 .contextMenu {
                                     Button { UIPasteboard.general.string = message.copyText } label: { Label("Скопировать", systemImage: "doc.on.doc") }
                                     Button { beginForwarding([message]) } label: { Label("Переслать", systemImage: "arrowshape.turn.up.right") }
-                                    Button { selecting = true; selectedIDs.insert(message.id) } label: { Label("Выбрать", systemImage: "checkmark.circle") }
+                                    Button { beginSelection(message) } label: { Label("Выбрать", systemImage: "checkmark.circle") }.disabled(recordingActive)
                                     Button { replyTo = message; composerFocused = true } label: { Label("Ответить", systemImage: "arrowshape.turn.up.left") }
                                     if let location = message.content.location {
                                         Button("Яндекс Карты") { openYandexLocation(location) }
@@ -174,15 +175,36 @@ struct OnlineChatView: View {
                                     Spacer(minLength: 70)
                                 }
                             }
+                            Color.clear.frame(height: 1).id(bottomAnchor)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 12)
                     }
                     .scrollDismissesKeyboard(.interactively)
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    .defaultScrollAnchor(.bottom, for: .alignment)
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        geometry.contentSize.height + geometry.contentInsets.bottom - geometry.contentOffset.y - geometry.containerSize.height < 64
+                    } action: { _, bottom in nearBottom = bottom }
                     .simultaneousGesture(TapGesture().onEnded { closeAttachmentMenu() })
-                    .onAppear { scrollToBottom(proxy, animated: false) }
-                    .onChange(of: items) { old, new in
-                        if !selecting && old.last?.id != new.last?.id { scrollToBottom(proxy, animated: true) }
+                    .onChange(of: items.last?.id, initial: true) { _, new in
+                        guard new != nil else { return }
+                        let initial = !positionedInitially
+                        let follow = initial || nearBottom || items.last?.isOutgoing(for: store.username) == true
+                        positionedInitially = true
+                        if follow && (!selecting || initial) { scrollToBottom(proxy, animated: !initial) }
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if !nearBottom && !items.isEmpty {
+                            Button { scrollToBottom(proxy, animated: true) } label: {
+                                Image(systemName: "arrow.down").font(.system(size: 19, weight: .medium))
+                                    .foregroundStyle(Color.ocText).frame(width: 44, height: 44)
+                                    .background(Color.ocSurface, in: Circle())
+                                    .overlay(Circle().stroke(Color.ocMuted.opacity(0.18), lineWidth: 0.5))
+                                    .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+                            }.buttonStyle(.plain).accessibilityLabel("К последним сообщениям")
+                                .padding(12)
+                        }
                     }
                 }
                 if store.preparingFile || loadingMedia {
@@ -195,7 +217,7 @@ struct OnlineChatView: View {
                     .padding(.vertical, 8)
                     .transition(.opacity)
                 }
-                composer
+                if selecting { selectionTools } else { composer }
             }
             if showAttachmentMenu {
                 OnlineAttachmentMenu { action in
@@ -212,12 +234,13 @@ struct OnlineChatView: View {
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if selecting {
-                    Button { UIPasteboard.general.string = selectedItems.map(\.copyText).joined(separator: "\n") } label: { Image(systemName: "doc.on.doc") }.disabled(selectedIDs.isEmpty)
-                    Button { beginForwarding(selectedItems) } label: { Image(systemName: "arrowshape.turn.up.right") }.disabled(selectedIDs.isEmpty)
-                    Button("Готово") { selecting = false; selectedIDs.removeAll() }
+                    Button("Отмена") { selecting = false; selectedIDs.removeAll() }
                 }
             }
             ToolbarItem(placement: .principal) {
+                if selecting {
+                    Text("Выбрано: \(selectedIDs.count)").font(.headline).foregroundStyle(Color.ocText)
+                } else {
                 Button { showProfile = true } label: {
                     HStack(spacing: 9) {
                         OnlineAvatarView(profile: profile, username: peer, size: 34)
@@ -232,6 +255,7 @@ struct OnlineChatView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                }
             }
         }
         .sheet(isPresented: $showProfile) {
@@ -301,7 +325,8 @@ struct OnlineChatView: View {
                 showRecordButton: draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 disabled: store.preparingFile || loadingMedia,
                 onBegan: { composerFocused = false; closeAttachmentMenu() },
-                onSend: { url in store.sendPickedFile(url, to: peer, body: attachmentBody()) }
+                onSend: { url in store.sendPickedFile(url, to: peer, body: attachmentBody()) },
+                onActivityChanged: { recordingActive = $0 }
             ) {
                 HStack(alignment: .bottom, spacing: 8) {
                     attachmentButton
@@ -435,9 +460,36 @@ struct OnlineChatView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        guard let last = items.last else { return }
-        let action = { proxy.scrollTo(last.id, anchor: .bottom) }
-        if animated { withAnimation(.easeOut(duration: 0.2), action) } else { action() }
+        guard !items.isEmpty else { return }
+        // Run after the lazy stack has laid out the newly inserted message.
+        DispatchQueue.main.async {
+            let action = { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
+            if animated && !reduceMotion { withAnimation(.easeOut(duration: 0.2), action) }
+            else { action() }
+        }
+    }
+
+    private var selectionTools: some View {
+        HStack {
+            Button { UIPasteboard.general.string = selectedItems.map(\.copyText).joined(separator: "\n") } label: {
+                Label("Копировать", systemImage: "doc.on.doc")
+            }
+            Spacer()
+            Button { beginForwarding(selectedItems) } label: {
+                Label("Переслать", systemImage: "arrowshape.turn.up.right")
+            }
+        }
+        .font(.system(size: 15, weight: .medium))
+        .padding(16).background(Color.ocSurface)
+        .disabled(selectedIDs.isEmpty)
+    }
+
+    private func beginSelection(_ message: OnlineMessage) {
+        guard !recordingActive else { return }
+        composerFocused = false
+        closeAttachmentMenu()
+        selecting = true
+        selectedIDs.insert(message.id)
     }
 
     private var selectedItems: [OnlineMessage] { items.filter { selectedIDs.contains($0.id) } }

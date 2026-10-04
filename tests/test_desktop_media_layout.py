@@ -13,6 +13,7 @@ from desktop_chat.shared import THEME, build_palette, DARK_BASE, LIGHT_BASE, lum
 from desktop_chat.capture_preview import CapturePreview
 from desktop_chat.message_widgets import LinkedMessageText
 import queue
+import threading
 from types import SimpleNamespace
 
 
@@ -62,13 +63,43 @@ class DesktopMediaLayoutTests(unittest.TestCase):
             image.save(path, exif=exif)
             preview = PhotoPreview(self.root, path, viewport)
             preview.pack()
-            self.root.update()
+            deadline = time.monotonic() + 2
+            while preview.source is None and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(0.01)
+            self.assertIsNotNone(preview.source)
             self.assertGreater(preview.image.height(), preview.image.width())
             viewport.configure(width=100)
             self.root.update()
             preview.render()
             self.assertLessEqual(preview.image.width(), viewport.winfo_width() - 52)
             preview.destroy()
+
+    def test_slow_photo_decode_does_not_block_interface(self):
+        viewport = tk.Canvas(self.root, width=300, height=300)
+        viewport.pack()
+        gate = threading.Event()
+        entered = threading.Event()
+        def decode(_path):
+            entered.set()
+            gate.wait(timeout=2)
+            return Image.new("RGB", (120, 160), "blue")
+        with patch("desktop_chat.photos.read_thumbnail", side_effect=decode):
+            start = time.monotonic()
+            preview = PhotoPreview(self.root, "test.jpg", viewport)
+            try:
+                preview.pack()
+                self.root.update()
+                self.assertLess(time.monotonic() - start, 0.2)
+                self.assertTrue(entered.wait(timeout=1))
+                self.assertIsNone(preview.source)
+                processed = []
+                self.root.after_idle(lambda: processed.append(True))
+                self.root.update()
+                self.assertEqual(processed, [True])
+            finally:
+                gate.set()
+                preview.destroy()
 
     def test_video_capture_preview_has_transparent_corners(self):
         feed = SimpleNamespace(frames=queue.Queue(), level=0.5)

@@ -6,7 +6,7 @@ import uuid
 import webbrowser
 from online_chat.message_content import decode, encode, preview, quote
 from online_chat import valid_username, normalize_username
-from .shared import THEME, PillButton, ui_font
+from .shared import THEME, PillButton, ui_font, mix_hex
 from .message_widgets import map_url
 
 
@@ -15,7 +15,7 @@ class OnlineMessageActions:
         tag = "OnlineMessageSelection" + str(local_id)
         if not hasattr(row, "selection_binding"):
             def select(event):
-                if self.online_selected:
+                if self.selection_active:
                     self.select_online_item(local_id)
                     return "break"
             token = self.root.bind_class(tag, "<Button-1>", select)
@@ -33,7 +33,20 @@ class OnlineMessageActions:
             widget.bind("<Control-Button-1>", lambda event: self.message_context(event, local_id))
             for child in widget.winfo_children(): bind(child)
         bind(row)
-        if local_id in self.online_selected: row.configure(bg=THEME["accent"])
+        self.paint_message_selection(row, local_id)
+
+    @property
+    def selection_active(self):
+        return getattr(self, "online_selection_mode", bool(self.online_selected))
+
+    def paint_message_selection(self, row, local_id):
+        selected = local_id in self.online_selected
+        bg = mix_hex(THEME["chat_bg"], THEME["accent"], 0.10) if selected or getattr(row, "reply_flash", False) else THEME["chat_bg"]
+        row.configure(bg=bg)
+        if hasattr(row, "selection_chrome"):
+            marker, holder = row.selection_chrome
+            holder.configure(bg=bg)
+            marker.set_selected(self.selection_active, selected, bg)
 
     def message_context(self, event, local_id):
         item = self.find_online_item(local_id)
@@ -66,33 +79,53 @@ class OnlineMessageActions:
         self.online_entry.focus_set()
 
     def select_online_item(self, local_id):
+        entering = not self.selection_active
+        self.online_selection_mode = True
         if local_id in self.online_selected: self.online_selected.remove(local_id)
         else: self.online_selected.add(local_id)
         for mid, row in self.online_media_rows.items():
-            if row.winfo_exists(): row.configure(bg=THEME["accent"] if mid in self.online_selected else THEME["chat_bg"])
+            if (entering or mid == local_id) and row.winfo_exists(): self.paint_message_selection(row, mid)
         self.refresh_message_tools()
 
     def jump_online_message(self, local_id):
         row = next((r for mid, r in self.online_media_rows.items() if mid.lower() == local_id.lower()), None)
         if row and row.winfo_exists():
             canvas = self.online_transcript.canvas
-            canvas.update_idletasks()
-            height = self.online_transcript.inner.winfo_height()
-            canvas.yview_moveto(row.winfo_y() / max(1, height))
-            row.configure(bg=THEME["accent"])
-            self.root.after(900, lambda: row.configure(bg=THEME["chat_bg"]) if row.winfo_exists() else None)
+            self.online_transcript.follow_tail = False
+            def jump():
+                if not row.winfo_exists(): return
+                height = self.online_transcript.inner.winfo_height()
+                canvas.yview_moveto(row.winfo_y() / max(1, height))
+                row.reply_flash = True
+                self.paint_message_selection(row, local_id)
+            self.root.after_idle(jump)
+            def end_flash():
+                if row.winfo_exists():
+                    row.reply_flash = False
+                    self.paint_message_selection(row, local_id)
+            self.root.after(900, end_flash)
         else: self.set_status("Ответ", THEME["muted"], "Исходное сообщение не загружено в текущем окне")
 
     def refresh_message_tools(self):
         host = getattr(self, "online_message_tools", None)
         if not host or not host.winfo_exists(): return
-        for child in host.winfo_children(): child.destroy()
-        if self.online_selected:
-            items = [m for m in self.online_chats.get(self.active_online_chat, []) if m.get("local_id") in self.online_selected]
-            tk.Label(host, text=f"Выбрано: {len(items)}", bg=THEME["surface"], fg=THEME["text"], font=ui_font(11)).pack(side="left", padx=8)
-            PillButton(host, "Копировать", lambda: self.copy_online_items(items), width=100, height=30).pack(side="left", padx=4)
-            PillButton(host, "Переслать", lambda: self.forward_online_items(items), width=100, height=30).pack(side="left", padx=4)
-            PillButton(host, "Готово", self.clear_message_selection, variant="secondary", width=80, height=30).pack(side="right", padx=4)
+        mode = "selection" if self.selection_active else ("reply" if self.online_reply else "normal")
+        if mode != getattr(host, "tools_mode", None) or mode == "reply":
+            for child in host.winfo_children(): child.destroy()
+            host.tools_mode = mode
+            if mode == "selection":
+                host.selection_count = tk.Label(host, bg=THEME["surface"], fg=THEME["text"], font=ui_font(12, "bold"))
+                host.selection_count.pack(side="left", padx=12)
+                selected_items = lambda: [m for m in self.online_chats.get(self.active_online_chat, []) if m.get("local_id") in self.online_selected]
+                host.copy_action = PillButton(host, "Копировать", lambda: self.copy_online_items(selected_items()), variant="secondary", width=110, height=34)
+                host.copy_action.pack(side="left", padx=4, pady=6)
+                host.forward_action = PillButton(host, "Переслать", lambda: self.forward_online_items(selected_items()), variant="secondary", width=110, height=34)
+                host.forward_action.pack(side="left", padx=4, pady=6)
+                PillButton(host, "Отмена", self.clear_message_selection, variant="ghost", width=90, height=34).pack(side="right", padx=8)
+        if mode == "selection":
+            host.selection_count.configure(text=f"Выбрано: {len(self.online_selected)}")
+            host.copy_action.configure_state(not self.online_selected)
+            host.forward_action.configure_state(not self.online_selected)
         elif self.online_reply:
             tk.Label(host, text="Ответ @" + self.online_reply["sender"] + " · " + self.online_reply["text"][:60],
                      bg=THEME["surface"], fg=THEME["text"], font=ui_font(11), wraplength=350).pack(side="left", padx=12)
@@ -103,9 +136,10 @@ class OnlineMessageActions:
         self.refresh_message_tools()
 
     def clear_message_selection(self):
+        self.online_selection_mode = False
         self.online_selected.clear()
-        for row in self.online_media_rows.values():
-            if row.winfo_exists(): row.configure(bg=THEME["chat_bg"])
+        for mid, row in self.online_media_rows.items():
+            if row.winfo_exists(): self.paint_message_selection(row, mid)
         self.refresh_message_tools()
 
     def forward_online_items(self, items):

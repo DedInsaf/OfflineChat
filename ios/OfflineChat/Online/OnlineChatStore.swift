@@ -77,6 +77,7 @@ final class OnlineChatStore: ObservableObject {
     private var cursor: Int64 = 0
     private var syncTask: Task<Void, Never>?
     private var syncInFlight = false
+    private var readInFlight: Set<String> = []
     private var lastTypingSent: [String: Date] = [:]
     private(set) var openPeer: String?
 
@@ -456,18 +457,22 @@ final class OnlineChatStore: ObservableObject {
     }
 
     func markRead(peer: String) async {
+        guard !readInFlight.contains(peer) else { return }
         let ids = (messages[peer] ?? []).compactMap { message -> Int64? in
             guard !message.isOutgoing(for: username), message.status != .read else { return nil }
             return message.serverID
         }
         guard !ids.isEmpty else { return }
+        readInFlight.insert(peer)
+        defer { readInFlight.remove(peer) }
         do {
             try await api.acknowledge(username: username, sessionToken: sessionToken, messageIDs: ids, status: .read)
             var list = messages[peer] ?? []
-            for index in list.indices where !list[index].isOutgoing(for: username) {
+            let acknowledged = Set(ids)
+            for index in list.indices where list[index].serverID.map(acknowledged.contains) == true && !list[index].isOutgoing(for: username) {
                 list[index].status = .read
             }
-            messages[peer] = list
+            if messages[peer] != list { messages[peer] = list }
             persist()
         } catch {
             connectionText = "Нет связи"
@@ -500,16 +505,19 @@ final class OnlineChatStore: ObservableObject {
             let response = try await api.sync(username: username, sessionToken: sessionToken, after: cursor)
             try Task.checkCancellation()
             var deliveredIDs: [Int64] = []
+            var updatedProfiles = profiles
+            var updatedMessages = messages
+            var updatedPeers = peers
             for profile in response.profiles {
-                profiles[profile.username] = profile
-                if profile.username == username { myProfile = profile }
+                updatedProfiles[profile.username] = profile
+                if profile.username == username && myProfile != profile { myProfile = profile }
             }
             for event in response.events {
                 let message = event.message
                 let peer = message.peer(for: username)
-                let wasKnown = messages[peer]?.contains(where: { $0.clientID == message.clientID || ($0.serverID != nil && $0.serverID == message.serverID) }) == true
-                remember(peer: peer)
-                upsert(message)
+                let wasKnown = updatedMessages[peer]?.contains(where: { $0.clientID == message.clientID || ($0.serverID != nil && $0.serverID == message.serverID) }) == true
+                if !peer.isEmpty && peer != username && !updatedPeers.contains(peer) { updatedPeers.append(peer) }
+                updatedMessages[peer] = OnlineMessageMerge.inserting(message, into: updatedMessages[peer] ?? [])
                 if !message.isOutgoing(for: username), message.status == .sent, let id = message.serverID {
                     deliveredIDs.append(id)
                     if !wasKnown, openPeer != peer {
@@ -517,10 +525,14 @@ final class OnlineChatStore: ObservableObject {
                     }
                 }
             }
+            if profiles != updatedProfiles { profiles = updatedProfiles }
+            if messages != updatedMessages { messages = updatedMessages }
+            if peers != updatedPeers { peers = updatedPeers }
             cursor = max(cursor, response.cursor)
-            typingPeers = Set(response.typing)
-            connectionText = "Онлайн"
-            claimError = ""
+            let typing = Set(response.typing)
+            if typingPeers != typing { typingPeers = typing }
+            if connectionText != "Онлайн" { connectionText = "Онлайн" }
+            if !claimError.isEmpty { claimError = "" }
             if !deliveredIDs.isEmpty {
                 try await api.acknowledge(username: username, sessionToken: sessionToken, messageIDs: deliveredIDs, status: .delivered)
             }
@@ -532,30 +544,16 @@ final class OnlineChatStore: ObservableObject {
                 claimError = "Сессия закончилась. Войдите снова"
                 return
             }
-            connectionText = "Нет связи"
+            if connectionText != "Нет связи" { connectionText = "Нет связи" }
             if claimError.isEmpty { claimError = error.localizedDescription }
         }
     }
 
     private func upsert(_ incoming: OnlineMessage) {
         let peer = incoming.peer(for: username)
-        var list = messages[peer] ?? []
-        if let index = list.firstIndex(where: {
-            $0.clientID == incoming.clientID || ($0.serverID != nil && $0.serverID == incoming.serverID)
-        }) {
-            // A send timeout can arrive after sync has already confirmed acceptance.
-            if list[index].serverID != nil && incoming.serverID == nil { return }
-            var merged = incoming
-            if list[index].status.rank > incoming.status.rank { merged.status = list[index].status }
-            list[index] = merged
-        } else {
-            list.append(incoming)
-        }
-        list.sort { lhs, rhs in
-            if lhs.createdAt == rhs.createdAt { return lhs.clientID.uuidString < rhs.clientID.uuidString }
-            return lhs.createdAt < rhs.createdAt
-        }
-        messages[peer] = Array(list.suffix(500))
+        let existing = messages[peer] ?? []
+        let updated = OnlineMessageMerge.inserting(incoming, into: existing)
+        if updated != existing { messages[peer] = updated }
     }
 
     private func remember(peer: String) {

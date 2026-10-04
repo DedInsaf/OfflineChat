@@ -8,6 +8,7 @@ struct OnlineRecordingComposer<Content: View>: View {
     let disabled: Bool
     let onBegan: () -> Void
     let onSend: (URL) -> Void
+    var onActivityChanged: (Bool) -> Void = { _ in }
     @ViewBuilder let content: () -> Content
     @StateObject private var recorder = OnlineMessageRecorder()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -82,6 +83,7 @@ struct OnlineRecordingComposer<Content: View>: View {
         .animation(animation, value: recordedDraft != nil)
         .animation(animation, value: locked)
         .onDisappear { discard() }
+        .onChange(of: active) { _, active in onActivityChanged(active) }
         .onChange(of: recorder.busy) { _, busy in
             if !busy { locked = false }
         }

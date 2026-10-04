@@ -10,6 +10,7 @@ import tkinter as tk
 import weakref
 
 from .shared import THEME, ui_font, Image, ImageTk
+from .media_workers import thumbnail_workers
 
 
 class RecordedMessage(tk.Canvas):
@@ -73,6 +74,16 @@ class RecordedMessage(tk.Canvas):
         arguments += ["-ss", str(offset), "-i", self.path, "-an", "-vf", "fps=30,crop=min(iw\\,ih):min(iw\\,ih),scale=300:300"]
         if preview: arguments += ["-frames:v", "1"]
         arguments += ["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+        if preview:
+            def thumbnail():
+                if self.closed or generation != self.generation: return
+                try:
+                    result = subprocess.run(arguments, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
+                    if not self.closed and generation == self.generation and len(result.stdout) == 300 * 300 * 3:
+                        self.frames.put_nowait(Image.frombytes("RGB", (300, 300), result.stdout))
+                except (OSError, subprocess.TimeoutExpired, queue.Full): pass
+            thumbnail_workers.submit(thumbnail)
+            return
         process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.decoder = process
         def decode():

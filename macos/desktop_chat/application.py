@@ -6,6 +6,7 @@ from .recording import RecordingButton
 from .playback import RecordedMessage
 from .message_actions import OnlineMessageActions
 from .message_widgets import LinkedMessageText, LocationCard
+from .online_transcript import OnlineTranscript, MessageSelectionIndicator
 from online_chat.message_content import decode as decode_content, encode as encode_content, preview as content_preview
 
 
@@ -58,6 +59,7 @@ class App(OnlineMessageActions):
         self.online_location_pending_peer = None
         self.online_reply = None
         self.online_selected = set()
+        self.online_selection_mode = False
         self.online_forward_pending = {}
         init_fonts(root)
         harden_tk(root)
@@ -375,6 +377,7 @@ class App(OnlineMessageActions):
         self.active_online_chat = name
         self.online_reply = None
         self.online_selected.clear()
+        self.online_selection_mode = False
         self.online_chats.setdefault(name, [])
         if not hasattr(self, "online"):
             return
@@ -394,7 +397,7 @@ class App(OnlineMessageActions):
         title_label.bind("<Button-1>", lambda _event: self.open_peer_profile(name))
         self.online_peer_status = tk.Label(meta, text="@" + name, bg=THEME["surface"], fg=THEME["muted"], font=ui_font(11))
         self.online_peer_status.pack(anchor="w")
-        transcript = OnlineScrollFrame(self.online, bg=THEME["chat_bg"])
+        transcript = OnlineTranscript(self.online, bg=THEME["chat_bg"])
         transcript.pack(fill="both", expand=True)
         self.online_transcript = transcript
         self.online_ticks = {}
@@ -462,8 +465,11 @@ class App(OnlineMessageActions):
         if local_id:
             if not hasattr(self, "online_media_rows"): self.online_media_rows = {}
             self.online_media_rows[local_id] = row
+        marker = MessageSelectionIndicator(row)
+        marker.pack(side="left", padx=(0, 6), anchor="center")
         holder = tk.Frame(row, bg=THEME["chat_bg"])
-        holder.pack(anchor="e" if outgoing else "w")
+        holder.pack(side="right" if outgoing else "left")
+        row.selection_chrome = (marker, holder)
         bg = THEME["outgoing"] if outgoing else THEME["incoming"]
         fg = THEME["primary_fg"] if outgoing else THEME["text"]
         content = decode_content(text)
@@ -540,7 +546,7 @@ class App(OnlineMessageActions):
                 self.online_ticks[local_id] = mark
                 mark.bind("<Button-1>", lambda _event, mid=local_id: self.retry_online_message(mid))
         if scroll:
-            transcript.scroll_to_end()
+            transcript.message_added(outgoing=outgoing)
         if local_id: self.bind_message_actions(row, local_id)
 
     def add_recorded_media_card(self, holder, kind, attachment, local_id):
@@ -1621,11 +1627,14 @@ class App(OnlineMessageActions):
             profile = event.get("profile") or {}
             name = profile.get("name")
             if name:
-                profile["_stamp"] = time.time()
+                previous = self.online_profiles.get(name) or {}
+                visual_changed = any(previous.get(key) != profile.get(key) for key in ("name", "display_name", "bio", "avatar_base64"))
+                profile["_stamp"] = time.time() if visual_changed else previous.get("_stamp")
                 self.online_profiles[name] = profile
-                save_online_profiles(self.online_profiles)
-                self._online_list_sig = None
-                self._list_dirty = True
+                if visual_changed:
+                    save_online_profiles(self.online_profiles)
+                    self._online_list_sig = None
+                    self._list_dirty = True
         elif kind == "online_profile_updated":
             profile = event.get("profile") or {}
             old_name = event.get("old_name") or self.online_username

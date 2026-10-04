@@ -111,7 +111,7 @@ struct OnlineCameraPicker: UIViewControllerRepresentable {
     }
 }
 
-struct OnlineMessageBubble: View {
+struct OnlineMessageBubble: View, Equatable {
     let message: OnlineMessage
     let outgoing: Bool
     let onRetry: () -> Void
@@ -122,14 +122,19 @@ struct OnlineMessageBubble: View {
     @State private var mediaURL: URL?
     @State private var loading = false
 
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.message == rhs.message && lhs.outgoing == rhs.outgoing
+    }
+
     var body: some View {
+        let content = message.content
         HStack(alignment: .bottom) {
             if outgoing { Spacer(minLength: message.attachment?.kind == "circle" ? 8 : 24) }
             VStack(alignment: .leading, spacing: 3) {
-                if let forwarded = message.content.forward {
+                if let forwarded = content.forward {
                     Text("Переслано от @" + forwarded.sender).font(.caption).foregroundStyle(Color.ocMuted)
                 }
-                if let reply = message.content.reply {
+                if let reply = content.reply {
                     Button { onOpenReply(reply.id) } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("↩ @" + reply.sender).font(.caption.weight(.semibold))
@@ -143,10 +148,10 @@ struct OnlineMessageBubble: View {
                 if let attachment = message.attachment {
                     attachmentContent(attachment)
                 } else {
-                    if let location = message.content.location {
+                    if let location = content.location {
                         OnlineLocationCard(location: location)
                     } else {
-                    OnlineLinkedText(text: message.content.text)
+                    OnlineLinkedText(text: content.text)
                         .font(.system(size: 16))
                         .foregroundColor(outgoing ? .ocPrimaryFg : .ocText)
                     }
@@ -193,12 +198,8 @@ struct OnlineMessageBubble: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .fill(Color.black.opacity(0.08))
                         .frame(width: 246, height: 184)
-                    if let mediaURL, let image = UIImage(contentsOfFile: mediaURL.path) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 246, height: 184)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    if let mediaURL {
+                        OnlineThumbnailView(url: mediaURL)
                     } else if loading {
                         ProgressView().tint(.white)
                     } else {

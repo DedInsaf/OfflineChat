@@ -1,10 +1,12 @@
 import SwiftUI
 import UIKit
+import ImageIO
 
 struct OnlineAvatarView: View {
     let profile: OnlineProfile?
     let username: String
     var size: CGFloat = 48
+    @State private var image: UIImage?
 
     var body: some View {
         Group {
@@ -25,12 +27,18 @@ struct OnlineAvatarView: View {
         .frame(width: size, height: size)
         .clipShape(Circle())
         .overlay(Circle().stroke(Color.ocLine.opacity(0.55), lineWidth: 0.5))
-    }
-
-    private var image: UIImage? {
-        guard let encoded = profile?.avatarBase64,
-              let data = Data(base64Encoded: encoded) else { return nil }
-        return UIImage(data: data)
+        .task(id: profile?.avatarBase64) {
+            image = nil
+            guard let encoded = profile?.avatarBase64 else { return }
+            let result = await Task.detached(priority: .utility) {
+                OnlineThumbnailCache.image(key: "avatar:" + encoded) {
+                    guard let data = Data(base64Encoded: encoded) else { return nil }
+                    return CGImageSourceCreateWithData(data as CFData, nil)
+                }
+            }.value
+            guard !Task.isCancelled else { return }
+            image = result
+        }
     }
 
     private var initials: String {
