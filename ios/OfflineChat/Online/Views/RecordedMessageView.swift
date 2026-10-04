@@ -80,6 +80,7 @@ struct CircleVideoSurface: UIViewRepresentable {
 struct RecordedMessageView: View {
     let circle: Bool
     @StateObject private var playback: RecordedPlayback
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     init(url: URL, circle: Bool) {
         self.circle = circle
         _playback = StateObject(wrappedValue: RecordedPlayback(url: url))
@@ -103,7 +104,7 @@ struct RecordedMessageView: View {
                 .frame(width: playback.playing ? 270 : 200, height: playback.playing ? 270 : 200)
                 .clipShape(Circle())
                 .contentShape(Circle())
-                .onTapGesture { withAnimation(.easeInOut(duration: 0.22)) { playback.toggle() } }
+                .onTapGesture { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) { playback.toggle() } }
             } else {
                 HStack(spacing: 12) {
                     Button { playback.toggle() } label: {

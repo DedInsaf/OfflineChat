@@ -37,11 +37,14 @@ class DesktopMediaLayoutTests(unittest.TestCase):
         button.started = time.monotonic() - 7
         button.show_status()
         self.root.update()
-        self.assertIn("Голосовое  00:07", button.status_label.cget("text"))
+        self.assertIn("00:07", button.status_label.cget("text"))
+        self.assertIn("Сдвиньте для отмены", " ".join(button.hints.itemcget(item, "text") for item in button.hints.find_all() if button.hints.type(item) == "text"))
         self.assertLess(button.panel.winfo_y(), composer.winfo_y())
         button.locked = True
         button.show_actions()
-        self.assertIn("Запись закреплена", button.status_label.cget("text"))
+        self.assertTrue(button.hints.locked)
+        self.assertEqual(button.hints.cget("height"), "44")
+        self.assertIn("Отмена", " ".join(button.hints.itemcget(item, "text") for item in button.hints.find_all() if button.hints.type(item) == "text"))
         button.process = None
         button.clear_actions()
         self.assertIsNone(button.panel)
@@ -115,3 +118,25 @@ class DesktopMediaLayoutTests(unittest.TestCase):
             self.assertEqual(button.status_label.cget("bg"), THEME["surface"])
             self.assertGreater(abs(luminance(THEME["text"]) - luminance(THEME["surface"])), 0.4)
             button.destroy()
+
+    def test_waveform_reuses_items_and_stops_redrawing_when_paused(self):
+        feed = SimpleNamespace(frames=queue.Queue(), level=0.5, closed=False)
+        preview = CapturePreview(self.root, feed, False)
+        items = preview.find_all()
+        for _ in range(4): preview.tick()
+        self.assertEqual(preview.find_all(), items)
+        feed.closed = True
+        preview.tick()
+        self.assertEqual(preview.find_all(), items)
+
+    def test_recording_hint_follows_finger_without_extra_window(self):
+        button = RecordingButton(self.root, Mock(), Mock(), bg=THEME["surface"])
+        button.show_status()
+        self.root.update()
+        hints = button.hints
+        before = next(item for item in hints.find_all() if hints.type(item) == "text")
+        initial_x = hints.coords(before)[0]
+        hints.update_drag(-48, -40)
+        after = next(item for item in hints.find_all() if hints.type(item) == "text")
+        self.assertLess(hints.coords(after)[0], initial_x)
+        self.assertEqual(hints.winfo_toplevel(), self.root)

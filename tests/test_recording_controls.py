@@ -18,6 +18,9 @@ class RecordingGestureTests(unittest.TestCase):
         button.cancel = Mock()
         button.show_mode = Mock()
         button.show_actions = Mock()
+        button.hints = None
+        button.start = Mock()
+        button.lock_position = Mock()
         return button
 
     def test_slide_up_keeps_recording_after_release(self):
@@ -48,4 +51,19 @@ class RecordingGestureTests(unittest.TestCase):
         button = self.control()
         button.locked = True
         button.drag(SimpleNamespace(x_root=100, y_root=200))
+        button.cancel.assert_not_called()
+
+    def test_fast_upward_gesture_starts_and_locks_instead_of_losing_capture(self):
+        button = self.control()
+        button.job = "pending"
+        button.after_cancel = Mock()
+        button.drag(SimpleNamespace(x_root=200, y_root=100))
+        button.release(None)
+        button.start.assert_called_once()
+        button.finish.assert_not_called()
+
+    def test_small_movement_does_not_cancel_or_lock(self):
+        button = self.control()
+        button.drag(SimpleNamespace(x_root=170, y_root=180))
+        self.assertFalse(button.locked)
         button.cancel.assert_not_called()

@@ -420,16 +420,35 @@ class App(OnlineMessageActions):
         inner.pack(fill="x", padx=12, pady=10)
         self.attachment_button = ClipButton(inner, command=self.toggle_online_attachment_menu)
         self.attachment_button.pack(side="left", padx=6, pady=6)
-        self.online_entry = tk.Entry(inner, bg=THEME["surface_alt"], fg=THEME["text"], insertbackground=THEME["text"], disabledforeground=THEME["subtle"], selectbackground=THEME["primary"], selectforeground=THEME["primary_fg"], relief="flat", borderwidth=0, highlightthickness=0, font=ui_font(14))
+        self.online_draft_var = tk.StringVar()
+        self.online_entry = tk.Entry(inner, textvariable=self.online_draft_var, bg=THEME["surface_alt"], fg=THEME["text"], insertbackground=THEME["text"], disabledforeground=THEME["subtle"], selectbackground=THEME["primary"], selectforeground=THEME["primary_fg"], relief="flat", borderwidth=0, highlightthickness=0, font=ui_font(14))
         self.online_entry.pack(side="left", fill="x", expand=True, ipady=8, padx=12)
         self.online_entry.bind("<Return>", lambda _e: self.send_online_msg())
         self.online_entry.bind("<KeyRelease>", lambda _e: self.ping_online_typing())
-        PillButton(inner, "Отправить", command=self.send_online_msg, width=120, height=36).pack(side="right", padx=6, pady=6)
+        text_send = PillButton(inner, "Отправить", command=self.send_online_msg, width=120, height=36)
+        recording_busy = False
+        def recording_state(active):
+            nonlocal recording_busy
+            recording_busy = active
+            # Only one send action is visible while a recording/draft is open.
+            self.online_entry.configure(state="disabled" if active else "normal")
+            update_send_action()
+        def update_send_action(*_):
+            text_present = bool(self.online_draft_var.get().strip()) and not recording_busy
+            if text_present:
+                record_button.pack_forget()
+                if not text_send.winfo_manager(): text_send.pack(side="right", padx=6, pady=6)
+            else:
+                text_send.pack_forget()
+                if not record_button.winfo_manager(): record_button.pack(side="right", padx=6)
         recording_peer = self.active_online_chat
-        RecordingButton(inner, send=lambda path: self.queue_online_file(path, recipient=recording_peer),
+        record_button = RecordingButton(inner, send=lambda path: self.queue_online_file(path, recipient=recording_peer),
                         report=lambda error: self.set_status("Запись", THEME["danger"], error),
                         status_host=bar,
-                        bg=THEME["surface"], fg=THEME["accent"], font=ui_font(18)).pack(side="right", padx=6)
+                        on_state=recording_state,
+                        bg=THEME["surface_alt"], fg=THEME["accent"], font=ui_font(18))
+        record_button.pack(side="right", padx=6)
+        self.online_draft_var.trace_add("write", update_send_action)
         self.online_entry.focus()
         self._list_dirty = True
 

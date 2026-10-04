@@ -110,13 +110,6 @@ struct OnlineChatView: View {
     @State private var loadingMedia = false
     @StateObject private var locationProvider = OnlineLocationProvider()
     @FocusState private var composerFocused: Bool
-    @StateObject private var recorder = OnlineMessageRecorder()
-    @State private var videoRecording = false
-    @State private var recordPress: Date?
-    @State private var recordJob: DispatchWorkItem?
-    @State private var recordingLocked = false
-    @State private var recordingCancelled = false
-    @State private var recordedDraft: URL?
     @State private var replyTo: OnlineMessage?
     @State private var selecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -291,7 +284,7 @@ struct OnlineChatView: View {
     }
 
     private var composer: some View {
-        VStack {
+        VStack(spacing: 0) {
             if let replyTo {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -299,128 +292,48 @@ struct OnlineChatView: View {
                         Text(replyTo.previewText).font(.caption).lineLimit(2)
                     }.foregroundStyle(Color.ocText)
                     Spacer()
-                    Button { self.replyTo = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Color.ocMuted) }
+                    Button { self.replyTo = nil } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(Color.ocMuted)
+                    }
                 }.padding(10).background(Color.ocSurfaceAlt)
             }
-            if recorder.recording {
-                if videoRecording { RecordingPreview(session: recorder.session).frame(width: 180, height: 180).clipShape(Circle()) }
-                HStack {
-                    TimelineView(.periodic(from: .now, by: 0.2)) { _ in
-                        Text("● " + recorder.durationText).monospacedDigit().foregroundStyle(.red)
+            OnlineRecordingComposer(
+                showRecordButton: draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                disabled: store.preparingFile || loadingMedia,
+                onBegan: { composerFocused = false; closeAttachmentMenu() },
+                onSend: { url in store.sendPickedFile(url, to: peer, body: attachmentBody()) }
+            ) {
+                HStack(alignment: .bottom, spacing: 8) {
+                    attachmentButton
+                    TextField("Сообщение", text: $draft, axis: .vertical)
+                        .lineLimit(1...5)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color.ocSurfaceAlt)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .focused($composerFocused)
+                        .onChange(of: draft) { _, value in
+                            if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { store.sendTyping(to: peer) }
+                        }
+                    if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button {
+                            let value = OnlineMessageContent(text: draft, reply: replyTo.map(OnlineQuote.init)).encoded
+                            draft = ""
+                            replyTo = nil
+                            Task { await store.send(value, to: peer) }
+                        } label: {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(Color.ocPrimaryFg)
+                                .frame(width: 44, height: 44)
+                                .background(Color.ocPrimary, in: Circle())
+                        }
+                        .accessibilityLabel("Отправить сообщение")
                     }
-                    Text(recordingLocked ? "Запись закреплена" : "← отмена · ↑ закрепить").font(.caption)
-                    Button("Отменить") { discardRecording() }
-                    if recordingLocked {
-                        Button("Прослушать") { recorder.finish() }
-                        Button("Отправить") { recordingLocked = false; recorder.finish() }
-                    }
                 }
             }
-            if let recordedDraft {
-                RecordedMessageView(url: recordedDraft, circle: videoRecording)
-                HStack {
-                    Button("Удалить", role: .destructive) { try? FileManager.default.removeItem(at: recordedDraft); self.recordedDraft = nil }
-                    Button("Отправить") { store.sendPickedFile(recordedDraft, to: peer, body: attachmentBody()); self.recordedDraft = nil }
-                }
-            }
-        HStack(alignment: .bottom, spacing: 8) {
-            attachmentButton
-            TextField("Сообщение", text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Color.ocSurfaceAlt)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .focused($composerFocused)
-                .disabled(recorder.recording)
-                .onChange(of: draft) { _, value in
-                    if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { store.sendTyping(to: peer) }
-                }
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Image(systemName: videoRecording ? "video.fill" : "mic.fill")
-                    .font(.system(size: 20))
-                    .frame(width: 42, height: 42)
-                    .foregroundStyle(Color.ocPrimaryFg)
-                    .background(recorder.recording ? Color.red : Color.ocPrimary, in: Circle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
-                        if gesture.translation.width < -80 && !recordingLocked {
-                            recordingCancelled = true
-                            recordJob?.cancel()
-                            recorder.cancel()
-                            return
-                        }
-                        if gesture.translation.height < -65 && !recordingCancelled {
-                            recordingLocked = true
-                        }
-                        guard !recordingCancelled else { return }
-                        guard recordPress == nil else { return }
-                        recordPress = Date()
-                        let job = DispatchWorkItem {
-                            recorder.start(video: videoRecording) { url in
-                                guard let url else { return }
-                                if recordingLocked { recordedDraft = url; recordingLocked = false }
-                                else { store.sendPickedFile(url, to: peer, body: attachmentBody()) }
-                            }
-                        }
-                        recordJob = job
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: job)
-                    }.onEnded { _ in
-                        recordJob?.cancel()
-                        if recordingCancelled { recordingCancelled = false }
-                        else if recordingLocked {
-                            if !recorder.recording {
-                                recorder.start(video: videoRecording) { url in
-                                    guard let url else { return }
-                                    if recordingLocked { recordedDraft = url; recordingLocked = false }
-                                    else { store.sendPickedFile(url, to: peer, body: attachmentBody()) }
-                                }
-                            }
-                        }
-                        else if let pressed = recordPress, Date().timeIntervalSince(pressed) < 0.25 { videoRecording.toggle() }
-                        else { recorder.finish() }
-                        recordPress = nil
-                    })
-                    .accessibilityLabel(videoRecording ? "Видеокружок. Удерживайте для записи" : "Голосовое. Удерживайте для записи")
-                    .disabled(store.preparingFile || recordingLocked || recordedDraft != nil)
-            } else {
-            Button {
-                let value = OnlineMessageContent(text: draft, reply: replyTo.map(OnlineQuote.init)).encoded
-                draft = ""
-                replyTo = nil
-                Task { await store.send(value, to: peer) }
-            } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.ocPrimaryFg)
-                    .frame(width: 42, height: 42)
-                    .background(Color.ocPrimary)
-                    .clipShape(Circle())
-            }
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-        }
-        .onDisappear { discardRecording() }
-        .onChange(of: recorder.recording) { _, recording in
-            if !recording { recordPress = nil; recordJob = nil }
-        }
-        .alert("Запись", isPresented: Binding(get: { !recorder.error.isEmpty }, set: { if !$0 { recorder.error = "" } })) {
-            Button("ОК") { recorder.error = "" }
-        } message: { Text(recorder.error) }
-    }
-
-    private func discardRecording() {
-        recordJob?.cancel()
-        recordPress = nil
-        recordJob = nil
-        recordingCancelled = false
-        recordingLocked = false
-        recorder.cancel()
-        if let recordedDraft { try? FileManager.default.removeItem(at: recordedDraft) }
-        recordedDraft = nil
+        .background(Color.ocSurface)
     }
 
     private var attachmentButton: some View {
@@ -430,7 +343,7 @@ struct OnlineChatView: View {
         } label: {
             Image(systemName: "paperclip").font(.system(size: 20)).frame(width: 38, height: 42)
         }
-        .disabled(store.preparingFile || loadingMedia || recorder.recording)
+        .disabled(store.preparingFile || loadingMedia)
         .accessibilityLabel("Прикрепить")
     }
 

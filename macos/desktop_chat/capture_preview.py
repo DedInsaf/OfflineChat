@@ -9,10 +9,10 @@ from .shared import THEME
 SIDE = 176
 
 
-def capture_arguments(executable, path, video):
+def capture_arguments(executable, path, video, duration=60):
     args = [executable, "-y", "-nostats", "-thread_queue_size", "4", "-f", "avfoundation"]
     if video: args += ["-framerate", "30"]
-    args += ["-i", "0:0" if video else ":0", "-t", "60"]
+    args += ["-i", "0:0" if video else ":0", "-t", str(duration)]
     if video:
         args += ["-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=320:320",
                  "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "350k", "-pix_fmt", "yuv420p"]
@@ -20,7 +20,7 @@ def capture_arguments(executable, path, video):
              "-c:a", "aac", "-b:a", "48k", path]
     if video:
         # A second output from the SAME camera input, not a second camera session.
-        args += ["-map", "0:v:0", "-an", "-t", "60", "-vf",
+        args += ["-map", "0:v:0", "-an", "-t", str(duration), "-vf",
                  f"fps=30,crop=min(iw\\,ih):min(iw\\,ih),scale={SIDE}:{SIDE}",
                  "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
     return args
@@ -87,6 +87,10 @@ class CapturePreview(tk.Canvas):
         self.image_item = None
         self.waiting_drawn = False
         self.job = None
+        self.wave_items = []
+        if not video:
+            self.wave_items = [self.create_line(8 + i * 7, 28, 8 + i * 7, 30,
+                                                fill=self.accent, width=3, capstyle="round") for i in range(42)]
         self.bind("<Destroy>", self.cleanup)
         self.tick()
 
@@ -111,12 +115,12 @@ class CapturePreview(tk.Canvas):
                                      fill=self.text_color, justify="center")
         else:
             self.levels = self.levels[1:] + [self.feed.level]
-            self.delete("all")
             for i, level in enumerate(self.levels):
                 height = max(3, level * 42)
-                self.create_line(8 + i * 7, 29 - height / 2, 8 + i * 7, 29 + height / 2,
-                                 fill=self.accent, width=3)
-        self.job = self.after(16 if self.video else 85, self.tick)
+                self.coords(self.wave_items[i], 8 + i * 7, 29 - height / 2, 8 + i * 7, 29 + height / 2)
+        # A paused preview needs no redraw loop. It retains its last camera frame.
+        if not getattr(self.feed, "closed", False):
+            self.job = self.after(16 if self.video else 85, self.tick)
 
     def cleanup(self, event):
         if event.widget is not self: return
