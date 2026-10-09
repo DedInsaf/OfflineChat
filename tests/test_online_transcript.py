@@ -110,18 +110,22 @@ class SelectionLayoutTests(unittest.TestCase):
 
     def test_selection_keeps_geometry_and_toolbar_widgets(self):
         size = (self.row.winfo_height(), self.holder.winfo_x(), self.holder.winfo_width())
+        self.assertFalse(self.marker.winfo_manager())
         self.actions.select_online_item("first")
         self.root.update()
         self.assertEqual(size, (self.row.winfo_height(), self.holder.winfo_x(), self.holder.winfo_width()))
+        self.assertTrue(self.marker.winfo_manager())
         children = self.actions.online_message_tools.winfo_children()
         self.actions.select_online_item("first")
         self.root.update()
         self.assertEqual(children, self.actions.online_message_tools.winfo_children())
         self.assertTrue(self.actions.selection_active)
-        self.assertEqual(self.actions.online_message_tools.selection_count.cget("text"), "Выбрано: 0")
-        self.assertTrue(self.actions.online_message_tools.copy_action._disabled)
+        bar = self.actions.online_message_tools.selection_bar
+        self.assertEqual(bar.badge.cget("text"), "0")
+        self.assertTrue(bar.copy_action.disabled)
         self.actions.clear_message_selection()
         self.assertFalse(self.actions.selection_active)
+        self.assertFalse(self.marker.winfo_manager())
         self.assertEqual(self.marker.find_all(), ())
 
     def test_zero_selection_still_intercepts_bubble_actions(self):

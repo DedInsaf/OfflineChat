@@ -2,6 +2,7 @@
 import tkinter as tk
 from .shared import OnlineScrollFrame, THEME
 from .recording_ui import symbol_photo
+from .shared import mix_hex, ui_font
 
 
 class OnlineTranscript(OnlineScrollFrame):
@@ -101,11 +102,9 @@ class OnlineTranscript(OnlineScrollFrame):
 
 
 class MessageSelectionIndicator(tk.Canvas):
-    """Reserved gutter: selecting never changes a bubble's size or position."""
+    """A lightweight native-looking checkmark created only with canvas shapes."""
     def __init__(self, master):
-        super().__init__(master, width=28, height=28, bg=THEME["chat_bg"], highlightthickness=0, bd=0)
-        self.icons = {False: symbol_photo("circle", THEME["muted"], 22),
-                      True: symbol_photo("checkmark.circle.fill", THEME["accent"], 22)}
+        super().__init__(master, width=32, height=32, bg=THEME["chat_bg"], highlightthickness=0, bd=0)
         self.state_key = None
 
     def set_selected(self, mode, selected, bg):
@@ -115,5 +114,54 @@ class MessageSelectionIndicator(tk.Canvas):
         self.configure(bg=bg)
         self.delete("all")
         if mode:
-            if self.icons[selected]: self.create_image(14, 14, image=self.icons[selected])
-            else: self.create_text(14, 14, text="✓" if selected else "○", fill=THEME["accent"])
+            outline = THEME["accent"] if selected else mix_hex(THEME["muted"], bg, 0.24)
+            self.create_oval(5, 5, 27, 27, fill=THEME["accent"] if selected else bg,
+                             outline=outline, width=2)
+            if selected:
+                self.create_line(10, 16, 14, 20, 22, 11, fill=THEME["primary_fg"],
+                                 width=2.4, capstyle="round", joinstyle="round")
+
+
+class SelectionToolbar(tk.Frame):
+    """Compact action strip; updates do not rebuild its widget tree."""
+    def __init__(self, master, on_copy, on_forward, on_cancel):
+        super().__init__(master, bg=THEME["surface"], highlightthickness=1,
+                         highlightbackground=THEME["line"])
+        left = tk.Frame(self, bg=THEME["surface"])
+        left.pack(side="left", padx=14, pady=8)
+        self.badge = tk.Label(left, text="0", width=3, bg=THEME["accent"],
+                              fg=THEME["primary_fg"], font=ui_font(11, "bold"), padx=2, pady=3)
+        self.badge.pack(side="left")
+        self.title = tk.Label(left, text="Выбрано сообщений", bg=THEME["surface"],
+                              fg=THEME["text"], font=ui_font(12, "bold"))
+        self.title.pack(side="left", padx=(9, 18))
+        self.copy_action = self._action(left, "doc.on.doc", "Копировать", on_copy)
+        self.forward_action = self._action(left, "arrowshape.turn.up.right", "Переслать", on_forward)
+        self.cancel_action = self._action(self, "xmark", "Готово", on_cancel, muted=True)
+        self.cancel_action.pack(side="right", padx=10, pady=7)
+
+    def _action(self, master, symbol, text, command, muted=False):
+        button = tk.Frame(master, bg=THEME["surface"], cursor="hand2", padx=8, pady=5)
+        button.photo = symbol_photo(symbol, THEME["muted"] if muted else THEME["accent"], 16)
+        icon = tk.Label(button, image=button.photo, text="" if button.photo else "×" if muted else "",
+                        bg=THEME["surface"], fg=THEME["muted"], font=ui_font(13, "bold"))
+        icon.pack(side="left")
+        label = tk.Label(button, text=text, bg=THEME["surface"],
+                         fg=THEME["muted"] if muted else THEME["text"], font=ui_font(11, "bold"))
+        label.pack(side="left", padx=(6, 0))
+        for widget in (button, icon, label): widget.bind("<Button-1>", lambda _e, cmd=command: cmd())
+        if not muted: button.pack(side="left", padx=2)
+        button.label_widget = label
+        button.icon_widget = icon
+        return button
+
+    def update_count(self, count):
+        self.badge.configure(text=str(count))
+        disabled = count == 0
+        color = THEME["subtle"] if disabled else THEME["text"]
+        cursor = "arrow" if disabled else "hand2"
+        for action in (self.copy_action, self.forward_action):
+            action.disabled = disabled
+            action.configure(cursor=cursor)
+            action.label_widget.configure(fg=color, cursor=cursor)
+            action.icon_widget.configure(cursor=cursor)

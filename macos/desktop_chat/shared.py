@@ -12,16 +12,19 @@ import socket
 import subprocess
 import uuid
 import base64
+import io
 import hashlib
 import tempfile
 import sys
 from urllib.parse import quote
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageOps, ImageDraw
 except ImportError:
     Image = None
     ImageTk = None
+    ImageOps = None
+    ImageDraw = None
 
 try:
     import objc
@@ -119,6 +122,7 @@ LIGHT_BASE = {"bg": "#EFEAE2", "text": "#1C1915", "accent": "#1F4F46"}
 DARK_BASE = {"bg": "#0B0F14", "text": "#E8EEF4", "accent": "#3EE0B4"}
 THEME = {}
 FONTS = {"body": "Helvetica Neue", "display": "Helvetica Neue"}
+_AVATAR_IMAGES = {}
 
 GUIDES = [
     ("Номера", "112 — единый номер.\n101 — пожарные.\n102 — полиция.\n103 — скорая.\n104 — газ.\nС мобильного 112 работает без SIM и без интернета."),
@@ -572,21 +576,18 @@ def avatar_photo(encoded, size):
     try:
         raw = base64.b64decode(encoded, validate=True)
         digest = hashlib.sha256(raw).hexdigest()[:24]
-        cache_dir = os.path.expanduser("~/Library/Caches/OfflineChat/avatars")
-        os.makedirs(cache_dir, exist_ok=True)
-        source = os.path.join(cache_dir, digest + ".image")
-        rendered = os.path.join(cache_dir, f"{digest}-{int(size)}.png")
-        if not os.path.exists(rendered):
-            with open(source, "wb") as handle:
-                handle.write(raw)
-            subprocess.run(
-                ["sips", "-Z", str(int(size)), "-s", "format", "png", source, "--out", rendered],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=8,
-                check=True,
-            )
-        return tk.PhotoImage(file=rendered)
+        target = max(8, int(size))
+        key = (digest, target)
+        if key not in _AVATAR_IMAGES:
+            with Image.open(io.BytesIO(raw)) as opened:
+                image = ImageOps.exif_transpose(opened).convert("RGBA")
+                image = ImageOps.fit(image, (target, target), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (target, target), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, target - 1, target - 1), fill=255)
+            image.putalpha(mask)
+            if len(_AVATAR_IMAGES) >= 64: _AVATAR_IMAGES.pop(next(iter(_AVATAR_IMAGES)))
+            _AVATAR_IMAGES[key] = image
+        return ImageTk.PhotoImage(_AVATAR_IMAGES[key])
     except Exception:
         return None
 

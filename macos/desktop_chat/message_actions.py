@@ -7,6 +7,7 @@ import webbrowser
 from online_chat.message_content import decode, encode, preview, quote
 from online_chat import valid_username, normalize_username
 from .shared import THEME, PillButton, ui_font, mix_hex
+from .online_transcript import SelectionToolbar
 from .message_widgets import map_url
 
 
@@ -41,11 +42,15 @@ class OnlineMessageActions:
 
     def paint_message_selection(self, row, local_id):
         selected = local_id in self.online_selected
-        bg = mix_hex(THEME["chat_bg"], THEME["accent"], 0.10) if selected or getattr(row, "reply_flash", False) else THEME["chat_bg"]
+        bg = mix_hex(THEME["chat_bg"], THEME["accent"], 0.055) if selected or getattr(row, "reply_flash", False) else THEME["chat_bg"]
         row.configure(bg=bg)
         if hasattr(row, "selection_chrome"):
             marker, holder = row.selection_chrome
             holder.configure(bg=bg)
+            if self.selection_active:
+                if not marker.winfo_manager(): marker.pack(side="left", padx=(2, 8), anchor="center", before=holder)
+            elif marker.winfo_manager():
+                marker.pack_forget()
             marker.set_selected(self.selection_active, selected, bg)
 
     def message_context(self, event, local_id):
@@ -114,18 +119,16 @@ class OnlineMessageActions:
             for child in host.winfo_children(): child.destroy()
             host.tools_mode = mode
             if mode == "selection":
-                host.selection_count = tk.Label(host, bg=THEME["surface"], fg=THEME["text"], font=ui_font(12, "bold"))
-                host.selection_count.pack(side="left", padx=12)
                 selected_items = lambda: [m for m in self.online_chats.get(self.active_online_chat, []) if m.get("local_id") in self.online_selected]
-                host.copy_action = PillButton(host, "Копировать", lambda: self.copy_online_items(selected_items()), variant="secondary", width=110, height=34)
-                host.copy_action.pack(side="left", padx=4, pady=6)
-                host.forward_action = PillButton(host, "Переслать", lambda: self.forward_online_items(selected_items()), variant="secondary", width=110, height=34)
-                host.forward_action.pack(side="left", padx=4, pady=6)
-                PillButton(host, "Отмена", self.clear_message_selection, variant="ghost", width=90, height=34).pack(side="right", padx=8)
+                host.selection_bar = SelectionToolbar(
+                    host,
+                    lambda: None if not self.online_selected else self.copy_online_items(selected_items()),
+                    lambda: None if not self.online_selected else self.forward_online_items(selected_items()),
+                    self.clear_message_selection,
+                )
+                host.selection_bar.pack(fill="x")
         if mode == "selection":
-            host.selection_count.configure(text=f"Выбрано: {len(self.online_selected)}")
-            host.copy_action.configure_state(not self.online_selected)
-            host.forward_action.configure_state(not self.online_selected)
+            host.selection_bar.update_count(len(self.online_selected))
         elif self.online_reply:
             tk.Label(host, text="Ответ @" + self.online_reply["sender"] + " · " + self.online_reply["text"][:60],
                      bg=THEME["surface"], fg=THEME["text"], font=ui_font(11), wraplength=350).pack(side="left", padx=12)

@@ -1,5 +1,7 @@
 """Tk geometry and state regressions, without using camera or microphone."""
 import os
+import base64
+import io
 import tempfile
 import time
 import tkinter as tk
@@ -9,7 +11,7 @@ from unittest.mock import Mock, patch
 from PIL import Image
 from desktop_chat.photos import PhotoPreview
 from desktop_chat.recording import RecordingButton
-from desktop_chat.shared import THEME, build_palette, DARK_BASE, LIGHT_BASE, luminance
+from desktop_chat.shared import THEME, build_palette, DARK_BASE, LIGHT_BASE, luminance, avatar_photo
 from desktop_chat.capture_preview import CapturePreview
 from desktop_chat.message_widgets import LinkedMessageText
 import queue
@@ -100,6 +102,16 @@ class DesktopMediaLayoutTests(unittest.TestCase):
             finally:
                 gate.set()
                 preview.destroy()
+
+    def test_avatar_resize_does_not_launch_external_converter(self):
+        data = io.BytesIO()
+        Image.new("RGB", (320, 180), "purple").save(data, format="PNG")
+        encoded = base64.b64encode(data.getvalue()).decode("ascii")
+        with patch("desktop_chat.shared.subprocess.run") as converter:
+            photo = avatar_photo(encoded, 42)
+        self.assertIsNotNone(photo)
+        self.assertEqual((photo.width(), photo.height()), (42, 42))
+        converter.assert_not_called()
 
     def test_video_capture_preview_has_transparent_corners(self):
         feed = SimpleNamespace(frames=queue.Queue(), level=0.5)

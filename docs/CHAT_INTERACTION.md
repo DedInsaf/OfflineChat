@@ -6,9 +6,10 @@ are unchanged.
 ## Selection
 
 - iPhone: long press → Select. Mac: right click → Select.
-- Stock circle/checkmark icons live in a fixed gutter, so bubble positions do not
-  jump when selection starts. Selected rows have a subtle theme-coloured tint.
-- A separate action bar shows the count, Copy, Forward and Cancel. Zero selected
+- The selection rail is absent during normal reading, so it wastes no chat width
+  and creates no hidden icon images. Entering selection reveals lightweight
+  canvas circles/checkmarks; selected rows have a subtle theme-coloured tint.
+- A compact action bar shows the count, Copy, Forward and Done. Zero selected
   messages disables actions, but does not silently exit selection.
 - Selection intercepts taps before links, photo viewers and audio/video players.
 - iPhone does not allow entering selection while a recording or recording draft
@@ -41,6 +42,12 @@ are unchanged.
   the same time. All Tk updates remain on its UI thread.
 - Presence-only Mac profile updates no longer invalidate/rebuild the chat list
   or write the profile cache; name, bio and avatar edits still refresh it.
+- Mac initially builds only the latest twelve rows. Older history is prepended
+  in UI-time-budgeted batches, and only recent visible media is auto-downloaded.
+- Event handling has an eight-millisecond frame budget; pending events schedule
+  another short pass instead of blocking Tk for an unbounded burst.
+- Avatar resizing no longer launches `sips` processes, and chat-cache JSON writes
+  run on a single background worker rather than pausing the composer.
 
 ## Checks
 

@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from desktop_chat.application import App
 
 
@@ -31,3 +31,15 @@ class OnlineProfileRefreshTests(unittest.TestCase):
         self.assertIsNone(self.app._online_list_sig)
         self.assertGreater(self.app.online_profiles["alice"]["_stamp"], 1)
         save.assert_called_once()
+
+    def test_chat_cache_write_is_submitted_to_background_worker(self):
+        self.app.online_chats = {"alice": [{"text": "Привет"}]}
+        self.app._chats_save_job = "job"
+        future = Mock()
+        with patch("desktop_chat.application.storage_workers.submit", return_value=future) as submit:
+            self.app._flush_chats()
+        self.assertIsNone(self.app._chats_save_job)
+        saved = submit.call_args.args[1]
+        self.assertEqual(saved, self.app.online_chats)
+        self.assertIsNot(saved, self.app.online_chats)
+        future.add_done_callback.assert_called_once()

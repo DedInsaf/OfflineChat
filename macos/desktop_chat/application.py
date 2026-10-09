@@ -1,5 +1,7 @@
 """Desktop application controller and screen composition."""
 
+from copy import deepcopy
+
 from .shared import *
 from .bluetooth import ble_worker
 from .recording import RecordingButton
@@ -7,6 +9,7 @@ from .playback import RecordedMessage
 from .message_actions import OnlineMessageActions
 from .message_widgets import LinkedMessageText, LocationCard
 from .online_transcript import OnlineTranscript, MessageSelectionIndicator
+from .media_workers import storage_workers
 from online_chat.message_content import decode as decode_content, encode as encode_content, preview as content_preview
 
 
@@ -61,6 +64,7 @@ class App(OnlineMessageActions):
         self.online_selected = set()
         self.online_selection_mode = False
         self.online_forward_pending = {}
+        self._history_render_generation = 0
         init_fonts(root)
         harden_tk(root)
         self.build()
@@ -401,9 +405,11 @@ class App(OnlineMessageActions):
         transcript.pack(fill="both", expand=True)
         self.online_transcript = transcript
         self.online_ticks = {}
-        history = [item for item in self.online_chats.get(name, []) if not is_control_body(item.get("text"))][-40:]
-        for item in history:
-            self.add_online_message(
+        history = [item for item in self.online_chats.get(name, []) if not is_control_body(item.get("text"))][-60:]
+        recent = history[-12:]
+        first_row = None
+        for index, item in enumerate(recent):
+            row = self.add_online_message(
                 transcript,
                 item.get("text", ""),
                 bool(item.get("outgoing")),
@@ -412,8 +418,27 @@ class App(OnlineMessageActions):
                 scroll=False,
                 attachment=item.get("attachment"),
                 media_path=item.get("media_path") or item.get("file_path"),
+                autoload_media=index >= max(0, len(recent) - 6),
             )
+            if first_row is None: first_row = row
         transcript.scroll_to_end()
+        self._history_render_generation += 1
+        generation = self._history_render_generation
+        older = list(reversed(history[:-12]))
+        def render_older():
+            nonlocal first_row
+            if generation != self._history_render_generation or not transcript.winfo_exists(): return
+            started = time.monotonic()
+            while older and time.monotonic() - started < 0.006:
+                item = older.pop(0)
+                first_row = self.add_online_message(
+                    transcript, item.get("text", ""), bool(item.get("outgoing")), status=item.get("status"),
+                    local_id=item.get("local_id"), scroll=False, attachment=item.get("attachment"),
+                    media_path=item.get("media_path") or item.get("file_path"), before_row=first_row,
+                    autoload_media=False,
+                )
+            if older: self.root.after(16, render_older)
+        if older: self.root.after(16, render_older)
         self.schedule_read(name)
         bar = tk.Frame(self.online, bg=THEME["surface"])
         bar.pack(fill="x")
@@ -456,17 +481,19 @@ class App(OnlineMessageActions):
         self._list_dirty = True
 
     def add_online_message(self, transcript, text, outgoing=False, status=None, local_id=None, scroll=True,
-                           attachment=None, media_path=None, reuse_row=None):
+                           attachment=None, media_path=None, reuse_row=None, before_row=None,
+                           autoload_media=True):
         row = reuse_row or tk.Frame(transcript.inner, bg=THEME["chat_bg"])
         if reuse_row:
             for child in row.winfo_children(): child.destroy()
         else:
-            row.pack(fill="x", padx=16, pady=4)
+            pack_options = {"fill": "x", "padx": 16, "pady": 4}
+            if before_row is not None: pack_options["before"] = before_row
+            row.pack(**pack_options)
         if local_id:
             if not hasattr(self, "online_media_rows"): self.online_media_rows = {}
             self.online_media_rows[local_id] = row
         marker = MessageSelectionIndicator(row)
-        marker.pack(side="left", padx=(0, 6), anchor="center")
         holder = tk.Frame(row, bg=THEME["chat_bg"])
         holder.pack(side="right" if outgoing else "left")
         row.selection_chrome = (marker, holder)
@@ -506,7 +533,7 @@ class App(OnlineMessageActions):
                     tk.Label(preview, text=file_size_text(attachment.get("size")), bg=preview["bg"],
                              fg=THEME["subtle"], font=ui_font(10)).place(relx=0.5, rely=0.61, anchor="center")
                 bind_click(card, lambda mid=local_id: self.open_online_media(mid))
-                if not shown and not outgoing and local_id:
+                if not shown and not outgoing and local_id and autoload_media:
                     self.root.after(80, lambda mid=local_id: self.load_online_media(mid, open_after=False))
             elif kind in ("video", "circle", "voice"):
                 if kind in ("circle", "voice") and media_path and os.path.isfile(media_path):
@@ -520,7 +547,7 @@ class App(OnlineMessageActions):
                     card.bind("<Button-1>", lambda event, mid=local_id: self.open_online_media(mid))
                 else:
                     self.add_recorded_media_card(holder, kind, attachment, local_id)
-                if kind in ("circle", "voice") and not media_path and local_id:
+                if kind in ("circle", "voice") and not media_path and local_id and autoload_media:
                     self.root.after(80, lambda mid=local_id: self.load_online_media(mid, open_after=False))
             else:
                 card = tk.Frame(holder, bg=bg, cursor="hand2", padx=12, pady=10)
@@ -548,6 +575,7 @@ class App(OnlineMessageActions):
         if scroll:
             transcript.message_added(outgoing=outgoing)
         if local_id: self.bind_message_actions(row, local_id)
+        return row
 
     def add_recorded_media_card(self, holder, kind, attachment, local_id):
         card = tk.Frame(holder, bg="#171A1F", cursor="hand2", width=280 if kind == "voice" else 320, height=70 if kind == "voice" else 180)
@@ -593,7 +621,10 @@ class App(OnlineMessageActions):
 
     def _flush_chats(self):
         self._chats_save_job = None
-        save_online_chats(self.online_chats)
+        # JSON serialization and atomic disk replacement must not pause typing.
+        snapshot = deepcopy(self.online_chats)
+        future = storage_workers.submit(save_online_chats, snapshot)
+        future.add_done_callback(lambda result: log("chat cache: " + str(result.exception())) if result.exception() else None)
 
     def ping_online_typing(self):
         now = time.time()
@@ -1412,12 +1443,14 @@ class App(OnlineMessageActions):
             self.status_detail.config(text=detail)
 
     def tick(self):
+        started = time.monotonic()
         for _ in range(24):
             try:
                 event = self.status_queue.get_nowait()
             except queue.Empty:
                 break
             self.handle(event)
+            if time.monotonic() - started >= 0.008: break
         now = time.time()
         if self.ble_typing_until and now > self.ble_typing_until:
             self.ble_typing_until = 0
@@ -1433,7 +1466,7 @@ class App(OnlineMessageActions):
         if self._list_dirty:
             self._list_dirty = False
             self.render_online_chats()
-        self.root.after(160, self.tick)
+        self.root.after(16 if not self.status_queue.empty() else 120, self.tick)
 
     def upsert_online_message(self, message):
         if not isinstance(message, dict):
